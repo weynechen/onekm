@@ -1,5 +1,6 @@
 #include "state_machine.h"
 #include "edge_detector.h"
+#include "input_capture.h"
 #include <stdio.h>
 #include <linux/input.h>
 
@@ -15,20 +16,29 @@ int process_event(const InputEvent *event, Message *msg) {
         return 0;
     }
 
-    // Handle edge detection for switching
-    if (current_state == STATE_LOCAL) {
-        int edge_dx, edge_dy;
-        if (event->type == EV_REL && event->code == REL_X) {
-            update_mouse_position(event->value, 0);
-        } else if (event->type == EV_REL && event->code == REL_Y) {
-            update_mouse_position(0, event->value);
-        }
+    // Track mouse position for edge detection in both states
+    if (event->type == EV_REL && event->code == REL_X) {
+        update_mouse_position(event->value, 0);
+    } else if (event->type == EV_REL && event->code == REL_Y) {
+        update_mouse_position(0, event->value);
+    }
 
-        if (is_at_edge(&edge_dx, &edge_dy)) {
-            // Switch to remote control
+    // Handle edge detection for switching
+    int edge_dx, edge_dy;
+    if (is_at_edge(&edge_dx, &edge_dy)) {
+        if (current_state == STATE_LOCAL && edge_dx < 0) {
+            // Switch to remote control when hitting left edge
             current_state = STATE_REMOTE;
+            set_device_grab(1); // Grab devices so input doesn't affect local system
             msg_switch(msg, 1); // 1 = switch to remote
             printf("Switched to REMOTE control (edge: dx=%d, dy=%d)\n", edge_dx, edge_dy);
+            return 1;
+        } else if (current_state == STATE_REMOTE && edge_dx > 0) {
+            // Switch to local control when hitting right edge
+            current_state = STATE_LOCAL;
+            set_device_grab(0); // Ungrab devices so input affects local system again
+            msg_switch(msg, 0); // 0 = switch to local
+            printf("Switched to LOCAL control (edge: dx=%d, dy=%d)\n", edge_dx, edge_dy);
             return 1;
         }
     }
@@ -40,23 +50,23 @@ int process_event(const InputEvent *event, Message *msg) {
             return 0;
 
         case STATE_REMOTE:
-            // Send all input events to remote client
+            // Send mouse movements to remote client (but not the edge-crossing ones)
             if (event->type == EV_REL) {
                 if (event->code == REL_X || event->code == REL_Y) {
-                    static int dx = 0, dy = 0;
+                    static int pending_dx = 0, pending_dy = 0;
 
                     if (event->code == REL_X) {
-                        dx = event->value;
-                        if (dx != 0) {
-                            msg_mouse_move(msg, dx, dy);
-                            dy = 0; // Reset dy after sending
+                        pending_dx = event->value;
+                        if (pending_dx != 0) {
+                            msg_mouse_move(msg, pending_dx, pending_dy);
+                            pending_dy = 0; // Reset dy after sending
                             return 1;
                         }
                     } else if (event->code == REL_Y) {
-                        dy = event->value;
-                        if (dy != 0) {
-                            msg_mouse_move(msg, dx, dy);
-                            dx = 0; // Reset dx after sending
+                        pending_dy = event->value;
+                        if (pending_dy != 0) {
+                            msg_mouse_move(msg, pending_dx, pending_dy);
+                            pending_dx = 0; // Reset dx after sending
                             return 1;
                         }
                     }
@@ -88,6 +98,7 @@ int process_event(const InputEvent *event, Message *msg) {
             // Check for escape key to return control
             if (event->type == EV_KEY && event->code == KEY_ESC && event->value == 1) {
                 current_state = STATE_LOCAL;
+                set_device_grab(0); // Ungrab devices so input affects local system again
                 msg_switch(msg, 0); // 0 = switch to local
                 printf("Switched to LOCAL control (ESC key)\n");
                 return 1;
@@ -100,5 +111,6 @@ int process_event(const InputEvent *event, Message *msg) {
 
 void cleanup_state_machine(void) {
     current_state = STATE_LOCAL;
+    set_device_grab(0); // Ensure devices are ungrabbed on cleanup
     printf("State machine cleaned up\n");
 }

@@ -57,3 +57,5 @@ windows_result.txt
 
 # swap files
 *.swp
+
+.stignore

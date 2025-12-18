@@ -119,21 +119,29 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // Debug: log received message
+        printf("DEBUG: Received msg type=%d, a=%d, b=%d\n", msg.type, msg.a, msg.b);
+
         // Process message based on type
         switch (msg.type) {
             case MSG_MOUSE_MOVE:
+                printf("DEBUG: Mouse move dx=%d, dy=%d\n", msg.a, msg.b);
                 inject_mouse_move(msg.a, msg.b);
                 break;
 
             case MSG_MOUSE_BUTTON:
+                printf("DEBUG: Mouse button=%d, state=%d\n", msg.a, msg.b);
                 inject_mouse_button(msg.a, msg.b);
                 break;
 
             case MSG_KEY_EVENT:
                 {
                     WORD vk_code = map_scancode_to_vk(msg.a);
+                    printf("DEBUG: Key event scancode=%d -> vk_code=%d, state=%d\n", msg.a, vk_code, msg.b);
                     if (vk_code != 0) {
                         inject_key_event(vk_code, msg.b);
+                    } else {
+                        printf("DEBUG: Unknown scancode %d, ignoring\n", msg.a);
                     }
                 }
                 break;

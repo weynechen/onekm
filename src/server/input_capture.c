@@ -1,4 +1,5 @@
 #include "input_capture.h"
+#include "state_machine.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #define MAX_DEVICES 10
 static struct libevdev *devices[MAX_DEVICES];
 static int num_devices = 0;
+static int grab_devices = 0;
 
 int init_input_capture(void) {
     const char *input_dir = "/dev/input";
@@ -69,6 +71,27 @@ int init_input_capture(void) {
     return 0;
 }
 
+void set_device_grab(int grab) {
+    if (grab_devices == grab) {
+        return; // Already in the desired state
+    }
+
+    grab_devices = grab;
+    for (int i = 0; i < num_devices; i++) {
+        if (grab) {
+            libevdev_grab(devices[i], LIBEVDEV_GRAB);
+        } else {
+            libevdev_grab(devices[i], LIBEVDEV_UNGRAB);
+        }
+    }
+
+    if (grab) {
+        printf("Input devices grabbed - events will not affect local system\n");
+    } else {
+        printf("Input devices ungrabbed - events will affect local system\n");
+    }
+}
+
 int capture_input(InputEvent *event) {
     int rc;
     struct input_event ev;
@@ -103,6 +126,9 @@ int capture_input(InputEvent *event) {
 }
 
 void cleanup_input_capture(void) {
+    // Ensure devices are ungrabbed before cleanup
+    set_device_grab(0);
+
     for (int i = 0; i < num_devices; i++) {
         if (devices[i]) {
             int fd = libevdev_get_fd(devices[i]);
