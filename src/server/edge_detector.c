@@ -5,7 +5,7 @@
 // Screen dimensions (should be configurable)
 #define SCREEN_WIDTH 1920
 #define SCREEN_HEIGHT 1080
-#define EDGE_THRESHOLD 10
+#define EDGE_THRESHOLD 5  // Reduced threshold for easier switching
 
 static int mouse_x = SCREEN_WIDTH / 2;
 static int mouse_y = SCREEN_HEIGHT / 2;

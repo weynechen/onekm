@@ -6,33 +6,63 @@
 static INPUT input_buffer[2];
 static int input_count = 0;
 
-int init_input_inject(void) {
-    // Initialize input buffer
-    memset(input_buffer, 0, sizeof(input_buffer));
-    input_count = 0;
-    return 0;
+// Screen dimensions for absolute positioning
+static int screen_width = 0;
+static int screen_height = 0;
+static int current_x = 0;
+static int current_y = 0;
+
+// Helper function to get screen dimensions
+void update_screen_dimensions(void) {
+    screen_width = GetSystemMetrics(SM_CXSCREEN);
+    screen_height = GetSystemMetrics(SM_CYSCREEN);
+
+    // Initialize cursor position to center if not set
+    if (current_x == 0 && current_y == 0) {
+        current_x = screen_width / 2;
+        current_y = screen_height / 2;
+    }
 }
 
-void inject_mouse_move(int dx, int dy) {
-    printf("DEBUG: inject_mouse_move - dx=%d, dy=%d\n", dx, dy);
-
-    // Create mouse move input using relative coordinates
+// Helper function to set absolute mouse position
+void set_mouse_position_absolute(int x, int y) {
+    // Normalize to 0-65535 range for absolute coordinates
     INPUT input = {0};
     input.type = INPUT_MOUSE;
-    input.mi.dx = dx;
-    input.mi.dy = dy;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE;  // Use relative move, not absolute
+    input.mi.dx = (x * 65535) / screen_width;
+    input.mi.dy = (y * 65535) / screen_height;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
     input.mi.mouseData = 0;
     input.mi.time = 0;
     input.mi.dwExtraInfo = 0;
 
-    printf("DEBUG: Sending relative mouse move: dx=%d, dy=%d\n", dx, dy);
+    SendInput(1, &input, sizeof(INPUT));
+}
+
+int init_input_inject(void) {
+    // Initialize input buffer
+    memset(input_buffer, 0, sizeof(input_buffer));
+    input_count = 0;
+
+    // No need for complex initialization with relative positioning
+    return 0;
+}
+
+void inject_mouse_move(int dx, int dy) {
+    // Use relative positioning for better performance
+    INPUT input = {0};
+    input.type = INPUT_MOUSE;
+    input.mi.dx = dx;
+    input.mi.dy = dy;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE;  // Use relative move
+    input.mi.mouseData = 0;
+    input.mi.time = 0;
+    input.mi.dwExtraInfo = 0;
+
     SendInput(1, &input, sizeof(INPUT));
 }
 
 void inject_mouse_button(uint8_t button, uint8_t state) {
-    printf("DEBUG: inject_mouse_button - button=%d, state=%d\n", button, state);
-
     INPUT input = {0};
     input.type = INPUT_MOUSE;
     input.mi.dx = 0;
@@ -44,18 +74,14 @@ void inject_mouse_button(uint8_t button, uint8_t state) {
     switch (button) {
         case 1: // Left button
             input.mi.dwFlags = (state == 1) ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
-            printf("DEBUG: Left button %s\n", state == 1 ? "DOWN" : "UP");
             break;
         case 2: // Right button
             input.mi.dwFlags = (state == 1) ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
-            printf("DEBUG: Right button %s\n", state == 1 ? "DOWN" : "UP");
             break;
         case 3: // Middle button
             input.mi.dwFlags = (state == 1) ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
-            printf("DEBUG: Middle button %s\n", state == 1 ? "DOWN" : "UP");
             break;
         default:
-            printf("DEBUG: Unsupported mouse button %d\n", button);
             return; // Unsupported button
     }
 
@@ -63,8 +89,6 @@ void inject_mouse_button(uint8_t button, uint8_t state) {
 }
 
 void inject_key_event(uint16_t vk_code, uint8_t state) {
-    printf("DEBUG: inject_key_event - vk_code=0x%04X, state=%d\n", vk_code, state);
-
     INPUT input = {0};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = vk_code;
@@ -96,11 +120,9 @@ void inject_key_event(uint16_t vk_code, uint8_t state) {
         case VK_SNAPSHOT:
         case VK_DIVIDE:
             input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-            printf("DEBUG: Using extended key flag\n");
             break;
     }
 
-    printf("DEBUG: Sending key %s\n", state == 1 ? "DOWN" : "UP");
     SendInput(1, &input, sizeof(INPUT));
 }
 

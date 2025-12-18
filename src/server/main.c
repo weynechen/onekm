@@ -5,6 +5,7 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -125,22 +126,54 @@ int main(int argc, char *argv[]) {
     flags = fcntl(client_fd, F_GETFL, 0);
     fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
 
-    // Main loop
+    // Disable Nagle's algorithm for low latency
+    int nagle_disabled = 1;
+    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nagle_disabled, sizeof(nagle_disabled)) < 0) {
+        fprintf(stderr, "Warning: Could not disable Nagle's algorithm\n");
+    }
+
+    // Disable TCP Cork/Nagle for even lower latency
+    #ifdef TCP_CORK
+    int cork_disabled = 0;
+    setsockopt(client_fd, IPPROTO_TCP, TCP_CORK, &cork_disabled, sizeof(cork_disabled));
+    #endif
+
+    // Main loop - optimized for low latency
     while (running) {
-        // Capture input
-        InputEvent event;
-        if (capture_input(&event) == 0) {
-            // Process through state machine
-            if (process_event(&event, &msg)) {
-                // Send message to client
-                if (send(client_fd, &msg, sizeof(Message), 0) < 0) {
-                    perror("Failed to send message");
-                    break;
+        int events_processed = 0;
+
+        // Capture and process multiple events in quick succession to reduce latency
+        // This allows processing multiple mouse movements without sleeping between them
+        for (int i = 0; i < 20; i++) { // Process up to 20 events per batch
+            InputEvent event;
+            if (capture_input(&event) == 0) {
+                // Process through state machine
+                if (process_event(&event, &msg)) {
+                    // Send message to client with MSG_NOSIGNAL to prevent SIGPIPE on connection issues
+                    // This is more efficient and avoids crashes
+                    ssize_t sent = send(client_fd, &msg, sizeof(Message), MSG_NOSIGNAL);
+                    if (sent < 0) {
+                        // Check if it's just a would-block error or actual connection issue
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            perror("Failed to send message");
+                            running = 0;  // Exit loop on error
+                            break;
+                        }
+                        // If would-block, we skip this event - input buffer on socket is full
+                        // This is better than blocking and causing a backlog
+                    }
+                    events_processed++;
                 }
+            } else {
+                break; // No more events available
             }
         }
 
-        usleep(1000); // 1ms delay to reduce CPU usage
+        // If we processed events, don't sleep
+        // If no events were processed, sleep briefly to avoid busy-waiting
+        if (events_processed == 0) {
+            usleep(100); // 0.1ms sleep when idle - reduced from 1ms
+        }
     }
 
     // Cleanup
