@@ -31,13 +31,16 @@ int process_event(const InputEvent *event, Message *msg) {
             current_state = STATE_REMOTE;
             set_device_grab(1); // Grab devices so input doesn't affect local system
             msg_switch(msg, 1); // 1 = switch to remote
+            start_remote_mode(); // Reset position for remote mode
             printf("Switched to REMOTE control (edge: dx=%d, dy=%d)\n", edge_dx, edge_dy);
             return 1;
-        } else if (current_state == STATE_REMOTE && edge_dx > 0) {
-            // Switch to local control when hitting right edge
+        } else if (current_state == STATE_REMOTE) {
+            // Switch to local control when hitting ANY edge while in remote state
+            // This allows returning to local from any edge (left, right, top, bottom)
             current_state = STATE_LOCAL;
             set_device_grab(0); // Ungrab devices so input affects local system again
             msg_switch(msg, 0); // 0 = switch to local
+            end_remote_mode(); // Restore normal edge detection
             printf("Switched to LOCAL control (edge: dx=%d, dy=%d)\n", edge_dx, edge_dy);
             return 1;
         }
