@@ -28,7 +28,8 @@ static void set_raw_terminal_mode(void) {
     struct termios raw;
     tcgetattr(STDIN_FILENO, &saved_termios);
     raw = saved_termios;
-    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    raw.c_lflag &= ~(ECHO | ICANON);  // 清除ECHO和ICANON
+    raw.c_lflag |= ISIG;  // 显式确保ISIG被设置，允许Ctrl+C
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
@@ -165,11 +166,10 @@ int main(int argc, char *argv[]) {
 
     printf("Ready. Press F12 to toggle LOCAL/REMOTE mode\n");
     printf("Press Ctrl+C to shutdown\n");
-    printf("Terminal set to raw mode (no echo, no special key processing)\n");
 
     // 设置终端为raw模式
     set_raw_terminal_mode();
-    printf("Terminal raw mode activated\n");
+    printf("Terminal set to raw mode (Ctrl+C enabled)\n");
 
     // Main loop - optimized for low latency
     HIDKeyboardReport keyboard_report;
