@@ -28,7 +28,7 @@
 #define UART_NUM UART_NUM_0
 #define UART_TX_PIN GPIO_NUM_43
 #define UART_RX_PIN GPIO_NUM_44
-#define UART_BAUD_RATE 115200
+static const int UART_BAUD_RATE = 230400;  // 波特率（可修改为230400等）
 #define UART_BUF_SIZE 128
 
 // 按钮配置
@@ -36,10 +36,10 @@
 
 // 共享数据结构
 typedef struct {
-    int8_t x;              // X 位移
-    int8_t y;              // Y 位移
-    uint8_t buttons;       // 按键位掩码 (bit0=左, bit1=右, bit2=中)
-    bool changed;          // 状态变化标志
+    int16_t x;              // X 位移（累积值）
+    int16_t y;              // Y 位移（累积值）
+    uint8_t buttons;        // 按键位掩码 (bit0=左, bit1=右, bit2=中)
+    bool changed;           // 状态变化标志
 } mouse_state_t;
 
 // 键盘直接转发状态
@@ -156,13 +156,15 @@ static void uart_receive_task(void *pvParameters)
                     switch (msg.type) {
                         case MSG_MOUSE_MOVE:
                             xSemaphoreTake(state_mutex, portMAX_DELAY);
-                            mouse_state.x = (int8_t)msg.data.mouse_move.dx;
-                            mouse_state.y = (int8_t)msg.data.mouse_move.dy;
+                            // 累积鼠标移动（不移除int16_t转换，直接累积）
+                            mouse_state.x += msg.data.mouse_move.dx;
+                            mouse_state.y += msg.data.mouse_move.dy;
                             mouse_state.changed = true;
                             xSemaphoreGive(state_mutex);
                             xSemaphoreGive(hid_update_sem);
-                            ESP_LOGD(TAG, "Mouse move: dx=%d, dy=%d",
-                                     msg.data.mouse_move.dx, msg.data.mouse_move.dy);
+                            ESP_LOGD(TAG, "Mouse move: dx=%d, dy=%d, accumulated: x=%d, y=%d",
+                                     msg.data.mouse_move.dx, msg.data.mouse_move.dy,
+                                     mouse_state.x, mouse_state.y);
                             break;
 
                         case MSG_MOUSE_BUTTON:
@@ -196,6 +198,13 @@ static void uart_receive_task(void *pvParameters)
                         case MSG_SWITCH:
                             is_remote_mode = (msg.data.control.state == 1);
                             ESP_LOGI(TAG, "Mode switched: %s", is_remote_mode ? "REMOTE" : "LOCAL");
+
+                            // 重置鼠标状态（清除累积的移动数据）
+                            xSemaphoreTake(state_mutex, portMAX_DELAY);
+                            mouse_state.x = 0;
+                            mouse_state.y = 0;
+                            mouse_state.changed = false;
+                            xSemaphoreGive(state_mutex);
 
                             // LED 指示
                             if (is_remote_mode) {
@@ -249,9 +258,23 @@ static void hid_send_task(void *pvParameters)
 
             // 发送鼠标事件
             if (mouse_changed) {
+                // 将int16_t转换为int8_t（TinyUSB API需要int8_t）
+                int8_t dx = (int8_t)(mouse_local.x > 127 ? 127 : (mouse_local.x < -128 ? -128 : mouse_local.x));
+                int8_t dy = (int8_t)(mouse_local.y > 127 ? 127 : (mouse_local.y < -128 ? -128 : mouse_local.y));
+
                 tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE,
-                    mouse_local.buttons, mouse_local.x, mouse_local.y, 0, 0);
-                ESP_LOGV(TAG, "Sent mouse report");
+                    mouse_local.buttons, dx, dy, 0, 0);
+                ESP_LOGV(TAG, "Sent mouse report: dx=%d, dy=%d", dx, dy);
+
+                // 减去已发送的值（保留未发送的部分）
+                xSemaphoreTake(state_mutex, portMAX_DELAY);
+                mouse_state.x -= dx;
+                mouse_state.y -= dy;
+                // 如果已经发送完所有累积值，清除changed标志
+                if ((mouse_state.x == 0 && mouse_state.y == 0) || !is_remote_mode) {
+                    mouse_state.changed = false;
+                }
+                xSemaphoreGive(state_mutex);
             }
         }
     }

@@ -11,6 +11,8 @@
 #include <stdarg.h>
 #include <linux/input.h>
 #include <time.h>
+#include <sched.h>
+#include <pthread.h>
 #include "common/protocol.h"
 #include "input_capture.h"
 #include "state_machine.h"
@@ -60,13 +62,22 @@ void emergency_cleanup(void) {
 }
 
 // Open and configure UART device
-int init_uart(const char *port) {
+int init_uart(const char *port, int baud_rate) {
     struct termios tty;
+    speed_t baud;
 
     uart_fd = open(port, O_RDWR | O_NOCTTY | O_SYNC);
     if (uart_fd < 0) {
         perror("Failed to open UART device");
         return -1;
+    }
+
+    // Convert baud rate to termios constant
+    switch (baud_rate) {
+        case 230400: baud = B230400; break;
+        case 460800: baud = B460800; break;
+        case 921600: baud = B921600; break;
+        default: baud = B115200; break;
     }
 
     // Get current terminal settings
@@ -77,8 +88,8 @@ int init_uart(const char *port) {
     }
 
     // Set baud rate
-    cfsetospeed(&tty, B115200);
-    cfsetispeed(&tty, B115200);
+    cfsetospeed(&tty, baud);
+    cfsetispeed(&tty, baud);
 
     // 8N1 configuration
     tty.c_cflag &= ~PARENB;        // No parity
@@ -112,13 +123,34 @@ int init_uart(const char *port) {
         return -1;
     }
 
-    printf("UART initialized: %s at 115200 baud\n", port);
+    printf("UART initialized: %s at %d baud\n", port, baud_rate);
     return 0;
 }
 
 // Send binary message to ESP32
 void send_message(Message *msg) {
     if (uart_fd >= 0 && msg) {
+
+        // switch (msg->type) {
+        //     case 1: // MSG_MOUSE_MOVE
+        //         printf(" dx=%d dy=%d", msg->data.mouse_move.dx, msg->data.mouse_move.dy);
+        //         break;
+        //     case 2: // MSG_MOUSE_BUTTON
+        //         printf(" button=%d state=%d", msg->data.mouse_button.button, msg->data.mouse_button.state);
+        //         break;
+        //     case 3: // MSG_KEYBOARD_REPORT
+        //         printf(" keyboard modifiers=0x%02x keys=[%02x %02x %02x %02x %02x %02x]",
+        //                msg->data.keyboard.modifiers,
+        //                msg->data.keyboard.keys[0], msg->data.keyboard.keys[1],
+        //                msg->data.keyboard.keys[2], msg->data.keyboard.keys[3],
+        //                msg->data.keyboard.keys[4], msg->data.keyboard.keys[5]);
+        //         break;
+        //     case 4: // MSG_SWITCH
+        //         printf(" switch state=%d", msg->data.control.state);
+        //         break;
+        // }
+        // printf("\n");
+
         int sent = write(uart_fd, msg, sizeof(Message));
         if (sent != sizeof(Message)) {
             fprintf(stderr, "UART write error: %s\n", strerror(errno));
@@ -129,14 +161,23 @@ void send_message(Message *msg) {
 int main(int argc, char *argv[]) {
     Message msg;
     const char *uart_port = "/dev/ttyACM0";
+    int baud_rate = 230400;  // Default to 230400
 
     // Parse command line arguments
     if (argc > 1) {
         uart_port = argv[1];
     }
+    if (argc > 2) {
+        baud_rate = atoi(argv[2]);
+        if (baud_rate != 115200 && baud_rate != 230400 &&
+            baud_rate != 460800 && baud_rate != 921600) {
+            fprintf(stderr, "Warning: Unsupported baud rate %d, using 230400\n", baud_rate);
+            baud_rate = 230400;
+        }
+    }
 
     printf("LanKM Server v2.0.0 (UART Mode)\n");
-    printf("Using UART device: %s\n", uart_port);
+    printf("Using UART device: %s at %d baud\n", uart_port, baud_rate);
 
     // Setup signal handlers
     signal(SIGINT, signal_handler);
@@ -158,7 +199,7 @@ int main(int argc, char *argv[]) {
     keyboard_state_init();
 
     // Initialize UART
-    if (init_uart(uart_port) != 0) {
+    if (init_uart(uart_port, baud_rate) != 0) {
         fprintf(stderr, "Failed to initialize UART\n");
         cleanup_input_capture();
         return 1;

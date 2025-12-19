@@ -34,7 +34,15 @@ sudo apt-get install build-essential cmake libevdev-dev libx11-dev
 
 ```bash
 # Linux Server (requires root)
-sudo ./build/lankm-server /dev/ttyACM0
+sudo ./build/lankm-server /dev/ttyACM0 [baud_rate]
+
+# Baud rate options: 115200, 230400 (default), 460800, 921600
+# Higher baud rates reduce latency but require ESP32 configuration
+
+# Examples:
+sudo ./build/lankm-server /dev/ttyACM0           # Default 230400 baud
+sudo ./build/lankm-server /dev/ttyACM0 460800    # High speed
+sudo ./build/lankm-server /dev/ttyACM0 921600    # Maximum speed
 ```
 
 ## Architecture
@@ -75,10 +83,49 @@ sudo ./build/lankm-server /dev/ttyACM0
 - No unit tests currently implemented
 - Uses clang-format for code formatting (if available)
 
+## Performance Optimization
+
+### Latency Reduction Tips
+
+1. **Increase Baud Rate** (Already implemented)
+   - Default: 230400 (was 115200)
+   - Maximum: 921600
+   - Reduces serial transmission delay from 0.5ms to 0.1ms
+
+2. **Reduce Sleep Delay** (Not implemented)
+   - Current: `usleep(100)` = 0.1ms
+   - Can reduce to `usleep(10)` or `usleep(0)` (busy wait)
+   - Reduces event processing latency
+
+3. **Real-time Scheduling** (Not implemented)
+   - Use `SCHED_FIFO` or `SCHED_RR`
+   - Requires root privileges
+   - Reduces Linux scheduler latency from 1-10ms to <1ms
+
+4. **Increase Mouse Flush Rate** (Implemented)
+   - Current: 5ms flush interval
+   - Can reduce to 1-2ms for faster mouse response
+
+5. **ESP32 USB HID Rate** (Requires ESP32 firmware change)
+   - Current ESP32 rate: ~125Hz (8ms)
+   - Can increase to 1000Hz (1ms)
+   - Biggest improvement for mouse responsiveness
+
+### Measurement Tools
+
+```bash
+# Check USB polling rate on Windows (requires external tool)
+# Check serial latency
+sudo ./lankm-server /dev/ttyACM0 921600
+
+# Use evtest to see input device latency
+evdev-grab /dev/input/eventX
+```
+
 ## Configuration
 
 - UART port: Configurable via command line argument
-- Default baud rate: 115200
+- Baud rate: 115200, 230400 (default), 460800, 921600
 - No configuration file - all settings are compile-time constants
 
 ## Permissions
