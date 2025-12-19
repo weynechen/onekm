@@ -3,36 +3,37 @@
 LanKM （LAN Keyboard & Mouse）是一个轻量级的局域网键鼠共享系统，使用硬件方案实现跨平台控制。
 
 **核心优势：**
-- ✅ Windows端**无需安装任何软件**
-- ✅ 绕过所有Windows输入拦截
+- ✅ **Linux服务器**捕获输入并通过UART发送到ESP32
+- ✅ 被控端**无需安装任何软件**（Windows/Linux/macOS/任何HID兼容系统通用）
+- ✅ 100% 兼容所有支持HID的操作系统
+- ✅ 绕过所有输入拦截机制
 - ✅ 极低延迟 (< 3ms)
-- ✅ 100% 兼容所有应用
 - ✅ **已验证技术栈**: ESP-IDF + TinyUSB
 
 ## 系统架构
 
 ```
-[物理键盘/鼠标] → [Linux服务器] → [UART] → [ESP32-S3] → [USB] → [Windows PC]
+[物理键盘/鼠标] → [Linux服务器] → [UART] → [ESP32-S3-WROOM-1] → [USB] → [被控电脑（Windows/Linux/macOS/任何HID兼容系统）]
 ```
 
 ### 组件说明
 
-1. **Linux Server**: 捕获物理输入，通过UART发送文本命令到ESP32
-2. **ESP32-S3**: 接收UART命令，通过TinyUSB发送HID报文
-3. **Windows PC**: 直接接收USB HID输入，无需任何软件
+1. **Linux Server** (仅Linux): 捕获物理输入，通过UART发送文本命令到ESP32
+2. **ESP32-S3-WROOM-1**: 接收UART命令，通过TinyUSB发送HID报文
+3. **被控电脑**: 直接接收USB HID输入 - 支持Windows、Linux、macOS或任何USB HID兼容设备（被控端无需软件）
 
 ## 硬件需求
 
 | 硬件 | 说明 | 用途 |
 |------|------|------|
-| ESP32-S3 开发板 | 带原生 USB OTG | HID 设备模拟 |
-| Linux 设备 | 树莓派/PC/笔记本 | 输入捕获 |
-| USB 线 | Micro USB / Type-C | 连接 Windows |
-| UART 线 | 3根 (TX/RX/GND) | Linux ↔ ESP32 |
+| **控制电脑** | Linux PC/树莓派（服务器仅支持Linux） | 运行lankm-server捕获输入 |
+| ESP32-S3-WROOM-1 开发板 | 带原生 USB OTG | HID 设备模拟 |
+| USB 线 | Micro USB / Type-C | 连接被控电脑（任何HID兼容系统） |
+| UART 线 | 3根 (TX/RX/GND) | 控制电脑 ↔ ESP32 |
 
 ### ESP32-S3 引脚连接
 ```
-USB  ─────────────────────→ Windows PC (直接插入)
+USB  ─────────────────────→ 被控电脑（直接插入Windows/Linux/macOS）
 GPIO44 (UART0_RX) ←────── Linux UART TX
 GPIO43 (UART0_TX) ─────── Linux UART RX
 GND                 ────── Linux GND
@@ -87,7 +88,7 @@ idf.py -p /dev/ttyACM0 monitor
 
 ```
 ESP32-S3:
-    USB  ─────────────→ Windows PC
+    USB  ─────────────→ 被控电脑（Windows/Linux/macOS）
     GPIO16 (RX) ←───── Linux UART TX
     GPIO17 (TX) ────── Linux UART RX
     GND      ────────→ Linux GND
@@ -103,7 +104,7 @@ sudo ./build/lankm-server /dev/ttyACM0
 ### 3. 操作说明
 
 - **F12**: 切换控制模式 (LOCAL ↔ REMOTE)
-- **REMOTE模式**: 所有输入发送到Windows
+- **REMOTE模式**: 所有输入发送到被控电脑（Windows/Linux/macOS）
 - **LOCAL模式**: 输入影响本地Linux系统
 
 ## 权限配置
@@ -198,7 +199,7 @@ lankm/
 
 | 指标 | 目标 | 说明 |
 |------|------|------|
-| 端到端延迟 | < 3ms | Linux捕获 → ESP32 → Windows |
+| 端到端延迟 | < 3ms | Linux捕获 → ESP32 → 被控电脑 |
 | CPU 占用 | < 1% | Linux 服务器 |
 | 内存占用 | < 5MB | Linux 服务器 |
 | ESP32 处理 | < 1ms | UART解析 + HID发送 |
@@ -207,25 +208,27 @@ lankm/
 
 | 特性 | 软件方案 | 硬件方案 (本项目) |
 |------|---------|------------------|
-| Windows兼容性 | 可能被拦截 | ✅ 100% 兼容 |
+| 跨平台支持 | 有限/不确定 | ✅ 通用HID支持 |
+| 输入拦截 | 可能被拦截 | ✅ 始终有效 |
 | 安全性 | 需要运行代码 | ✅ 纯硬件 |
 | 延迟 | 5-10ms | ✅ <3ms |
-| 维护成本 | 高 | ✅ 低 |
 | 无需安装 | ❌ | ✅ |
+| 维护成本 | 高 | ✅ 低 |
 
 ## 故障排除
 
-1. **ESP32未被识别**: 检查USB线和驱动
-2. **UART无响应**: 检查接线和权限
-3. **输入无效果**: 确认处于REMOTE模式 (F12切换)
-4. **USB断开**: 重新初始化USB
+1. **ESP32未被被控电脑识别**: 检查USB线和驱动（在Windows/Linux/macOS上均无需特殊驱动）
+2. **UART无响应**: 检查接线和Linux服务器权限
+3. **输入无效果**: 确认处于REMOTE模式 (F12切换) 并检查被控电脑是否接受HID输入
+4. **USB断开**: 重新初始化USB连接或更换被控电脑的USB端口
 
 ## 核心创新
 
-使用 **ESP32-S3 的 USB HID 功能** 替代 Windows 软件注入，彻底解决了：
-- Windows 输入拦截问题
-- 兼容性问题
-- 安全性问题
+使用 **ESP32-S3 的 USB HID 功能** 作为通用输入设备，彻底解决了：
+- 软件输入拦截和阻止问题
+- 跨平台兼容性问题（在Windows/Linux/macOS上通用）
+- 软件注入器的安全风险
+- 被控系统上的驱动和安装要求
 
 ## 许可证
 

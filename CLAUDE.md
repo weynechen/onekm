@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LanKM is a lightweight LAN keyboard and mouse sharing system that allows controlling two computers on a local network with a single keyboard and mouse.
+LanKM is a lightweight LAN keyboard and mouse sharing system that allows controlling multiple computers with a single keyboard and mouse.
 
-**New Architecture (Hardware-based):**
-- **Server (Linux)**: Captures physical input devices and sends to ESP32 via UART
-- **ESP32-S3**: Receives commands via UART and injects input via USB HID
-- **Windows PC**: Receives input from ESP32 USB (no software required)
+**Architecture:**
+- **Control Server (Linux only)**: Captures physical input devices and sends to ESP32 via UART
+- **ESP32-S3-WROOM-1**: Receives commands via UART and injects input via USB HID
+- **Target Computer (Windows/Linux/macOS/any HID-compatible)**: Receives USB HID input from ESP32 (no software required)
 
 ## Build Commands
 
