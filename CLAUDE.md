@@ -4,23 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LanKM is a lightweight LAN keyboard and mouse sharing system that allows controlling two computers on a local network with a single keyboard and mouse. The system consists of:
+LanKM is a lightweight LAN keyboard and mouse sharing system that allows controlling two computers on a local network with a single keyboard and mouse.
 
-- **Server (Linux)**: Captures physical input devices and decides where to send input
-- **Client (Windows)**: Receives network input and injects it into the system
+**New Architecture (Hardware-based):**
+- **Server (Linux)**: Captures physical input devices and sends to ESP32 via UART
+- **ESP32-S3**: Receives commands via UART and injects input via USB HID
+- **Windows PC**: Receives input from ESP32 USB (no software required)
 
 ## Build Commands
 
 ```bash
-# Build (Linux)
+# Build Server
 mkdir build && cd build
 cmake ..
 make
 
-# Build (Windows with Visual Studio)
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
+# Install
+sudo make install
 ```
 
 ## Dependencies
@@ -30,18 +30,11 @@ cmake --build . --config Release
 sudo apt-get install build-essential cmake libevdev-dev libx11-dev
 ```
 
-### Windows Client Dependencies:
-- Visual Studio 2015+ or MinGW
-- CMake 3.15+
-
-## Running the Applications
+## Running
 
 ```bash
 # Linux Server (requires root)
-sudo ./build/lankm-server
-
-# Windows Client
-./build/Release/lankm-client.exe <server-ip>
+sudo ./build/lankm-server /dev/ttyACM0
 ```
 
 ## Architecture
@@ -49,54 +42,54 @@ sudo ./build/lankm-server
 ### Core Components:
 
 1. **Protocol Layer** (`src/common/`):
-   - Simple binary TCP protocol for input events
+   - Simple binary protocol for input events
    - Message struct: `{uint8_t type, int16_t a, int16_t b}`
    - Message types: mouse move, mouse button, keyboard events, control switch
 
 2. **Server (Linux)**:
    - `input_capture.c`: Captures input using libevdev
-   - `edge_detector.c`: Detects mouse screen edge for switching control
    - `state_machine.c`: Manages control state (local/remote)
+   - `main.c`: Sends commands to ESP32 via UART
 
-3. **Client (Windows)**:
-   - `input_inject.c`: Injects input using Windows API
-   - `keymap.c`: Maps Linux key codes to Windows virtual key codes
+3. **ESP32-S3** (separate firmware):
+   - Receives UART commands
+   - Injects input via USB HID gadget
 
-### Network Architecture:
-- TCP connection on port 24800
-- Server listens for client connections
-- Unidirectional input flow from server to client
-- No GUI or configuration interface
+### Communication Architecture:
+- **Linux → ESP32**: UART (115200 baud, 8N1)
+- **ESP32 → Windows**: USB HID (keyboard + mouse)
+- Unidirectional flow: Server → ESP32 → Windows
+- No network connection needed to Windows
 
 ### Key Design Decisions:
-- Minimal latency (<5ms) prioritized over features
+- Hardware-based injection bypasses Windows software restrictions
+- Minimal latency (<3ms) via direct USB HID
 - Binary protocol for efficiency
-- Platform-specific input handling
-- No authentication or encryption (assumes trusted LAN)
+- No authentication needed (trusted LAN + hardware)
 
 ## Development Notes
 
 - Uses C11 standard
 - Compiler warnings enabled (-Wall -Wextra -Werror)
 - Struct packing for protocol compatibility
-- Platform-specific code isolated in server/client directories
 - No unit tests currently implemented
 - Uses clang-format for code formatting (if available)
 
 ## Configuration
 
-- TCP port: 24800 (defined in protocol.h)
-- Screen edge switching: enabled by default
+- UART port: Configurable via command line argument
+- Default baud rate: 115200
 - No configuration file - all settings are compile-time constants
 
 ## Permissions
 
-Linux server requires access to input devices:
+Linux server requires access to input devices and UART:
 ```
 KERNEL=="event*", MODE="0666", GROUP="input"
+KERNEL=="ttyUSB*", MODE="0666", GROUP="dialout"
 ```
 
 ## Rules
 1. 你必须使用英文完成代码及注释
 2. 你必须使用中文来思考和回答
-3. windows 的程序我会手动运行和测试并提供结果给你。
+3. ESP32的程序测试的方式为`idf-master` 加载环境变量（加载一次即可），随后`idf.py build app-flash monitor -p /dev/ttyACM0` 

@@ -1,19 +1,40 @@
+#define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <stdarg.h>
+#include <linux/input.h>
 #include "common/protocol.h"
 #include "input_capture.h"
 #include "state_machine.h"
+#include "keyboard_state.h"
+
+// F12键码（用于切换LOCAL/REMOTE模式）
+#define KEY_F12 88
 
 static int running = 1;
+static int uart_fd = -1;
+static struct termios saved_termios;  // 保存原始的终端设置
+
+// 设置终端为raw模式
+static void set_raw_terminal_mode(void) {
+    struct termios raw;
+    tcgetattr(STDIN_FILENO, &saved_termios);
+    raw = saved_termios;
+    raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+// 恢复终端设置
+static void restore_terminal_mode(void) {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
+}
 
 void signal_handler(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
@@ -25,20 +46,95 @@ void signal_handler(int sig) {
 // Emergency cleanup handler - called on abnormal termination
 void emergency_cleanup(void) {
     printf("\nEmergency cleanup - releasing all input devices...\n");
+    // 恢复终端
+    restore_terminal_mode();
     // Force ungrab all devices
     set_device_grab(0);
     cleanup_input_capture();
+
+    if (uart_fd >= 0) {
+        close(uart_fd);
+    }
+}
+
+// Open and configure UART device
+int init_uart(const char *port) {
+    struct termios tty;
+
+    uart_fd = open(port, O_RDWR | O_NOCTTY | O_SYNC);
+    if (uart_fd < 0) {
+        perror("Failed to open UART device");
+        return -1;
+    }
+
+    // Get current terminal settings
+    if (tcgetattr(uart_fd, &tty) != 0) {
+        perror("tcgetattr failed");
+        close(uart_fd);
+        return -1;
+    }
+
+    // Set baud rate
+    cfsetospeed(&tty, B115200);
+    cfsetispeed(&tty, B115200);
+
+    // 8N1 configuration
+    tty.c_cflag &= ~PARENB;        // No parity
+    tty.c_cflag &= ~CSTOPB;        // 1 stop bit
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;            // 8 data bits
+    tty.c_cflag &= ~CRTSCTS;       // No hardware flow control
+    tty.c_cflag |= CREAD | CLOCAL; // Enable receiver, ignore modem control
+
+    // Raw mode
+    tty.c_lflag &= ~ICANON;
+    tty.c_lflag &= ~ECHO;
+    tty.c_lflag &= ~ECHOE;
+    tty.c_lflag &= ~ECHONL;
+    tty.c_lflag &= ~ISIG;
+
+    // Disable software flow control
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+
+    // Raw output
+    tty.c_oflag &= ~OPOST;
+
+    // Timeout settings
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 10;  // 1 second timeout
+
+    // Apply settings
+    if (tcsetattr(uart_fd, TCSANOW, &tty) != 0) {
+        perror("tcsetattr failed");
+        close(uart_fd);
+        return -1;
+    }
+
+    printf("UART initialized: %s at 115200 baud\n", port);
+    return 0;
+}
+
+// Send binary message to ESP32
+void send_message(Message *msg) {
+    if (uart_fd >= 0 && msg) {
+        int sent = write(uart_fd, msg, sizeof(Message));
+        if (sent != sizeof(Message)) {
+            fprintf(stderr, "UART write error: %s\n", strerror(errno));
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
-    int server_fd, client_fd;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t client_len = sizeof(client_addr);
     Message msg;
+    const char *uart_port = "/dev/ttyACM0";
 
-    printf("LanKM Server v1.0.0\n");
+    // Parse command line arguments
+    if (argc > 1) {
+        uart_port = argv[1];
+    }
+
+    printf("LanKM Server v2.0.0 (UART Mode)\n");
+    printf("Using UART device: %s\n", uart_port);
 
     // Setup signal handlers
     signal(SIGINT, signal_handler);
@@ -56,130 +152,74 @@ int main(int argc, char *argv[]) {
     // Initialize state machine
     init_state_machine();
 
-    // Create TCP socket
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("Failed to create socket");
+    // Initialize keyboard state
+    keyboard_state_init();
+
+    // Initialize UART
+    if (init_uart(uart_port) != 0) {
+        fprintf(stderr, "Failed to initialize UART\n");
         cleanup_input_capture();
         return 1;
     }
 
-    // Set socket options
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Bind to port 24800
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(24800);
-
-    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Failed to bind to port");
-        close(server_fd);
-        cleanup_input_capture();
-        return 1;
-    }
-
-    // Listen for connections
-    if (listen(server_fd, 1) < 0) {
-        perror("Failed to listen");
-        close(server_fd);
-        cleanup_input_capture();
-        return 1;
-    }
-
-    printf("Server listening on port 24800...\n");
+    printf("Ready. Press F12 to toggle LOCAL/REMOTE mode\n");
     printf("Press Ctrl+C to shutdown\n");
+    printf("Terminal set to raw mode (no echo, no special key processing)\n");
 
-    // Set server socket to non-blocking
-    int flags = fcntl(server_fd, F_GETFL, 0);
-    fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
-
-    // Wait for client connection or shutdown signal
-    client_fd = -1;
-    while (running && client_fd < 0) {
-        client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-        if (client_fd < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No connection waiting, check signal and sleep
-                usleep(100000); // 100ms
-                continue;
-            } else {
-                perror("Failed to accept connection");
-                break;
-            }
-        }
-    }
-
-    if (!running) {
-        printf("Shutdown requested, exiting...\n");
-        close(server_fd);
-        cleanup_input_capture();
-        return 0;
-    }
-
-    printf("Client connected from %s\n", inet_ntoa(client_addr.sin_addr));
-
-    // Set client socket to non-blocking
-    flags = fcntl(client_fd, F_GETFL, 0);
-    fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-
-    // Disable Nagle's algorithm for low latency
-    int nagle_disabled = 1;
-    if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nagle_disabled, sizeof(nagle_disabled)) < 0) {
-        fprintf(stderr, "Warning: Could not disable Nagle's algorithm\n");
-    }
-
-    // Disable TCP Cork/Nagle for even lower latency
-    #ifdef TCP_CORK
-    int cork_disabled = 0;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_CORK, &cork_disabled, sizeof(cork_disabled));
-    #endif
+    // 设置终端为raw模式
+    set_raw_terminal_mode();
+    printf("Terminal raw mode activated\n");
 
     // Main loop - optimized for low latency
+    HIDKeyboardReport keyboard_report;
+    int last_report_sent = 0;
+
     while (running) {
         int events_processed = 0;
 
-        // Capture and process multiple events in quick succession to reduce latency
-        // This allows processing multiple mouse movements without sleeping between them
-        for (int i = 0; i < 20; i++) { // Process up to 20 events per batch
+        // Capture and process multiple events in quick succession
+        for (int i = 0; i < 20; i++) {
             InputEvent event;
             if (capture_input(&event) == 0) {
                 // Process through state machine
                 if (process_event(&event, &msg)) {
-                    // Send message to client with MSG_NOSIGNAL to prevent SIGPIPE on connection issues
-                    // This is more efficient and avoids crashes
-                    ssize_t sent = send(client_fd, &msg, sizeof(Message), MSG_NOSIGNAL);
-                    if (sent < 0) {
-                        // Check if it's just a would-block error or actual connection issue
-                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                            perror("Failed to send message");
-                            running = 0;  // Exit loop on error
-                            break;
-                        }
-                        // If would-block, we skip this event - input buffer on socket is full
-                        // This is better than blocking and causing a backlog
-                    }
+                    // Send message
+                    send_message(&msg);
                     events_processed++;
+                } else if (get_current_state() == STATE_REMOTE && event.type == EV_KEY) {
+                    // 处理键盘事件，在REMOTE模式下
+                    if (keyboard_state_process_key(event.code, event.value, &keyboard_report)) {
+                        // 键盘状态改变，发送HID报告
+                        msg_keyboard_report(&msg, &keyboard_report);
+                        send_message(&msg);
+                        last_report_sent = 1;
+                        events_processed++;
+                    }
                 }
             } else {
                 break; // No more events available
             }
         }
 
-        // If we processed events, don't sleep
+        // 如果有键盘状态改变但未发送（比如快速连续按键），立即发送
+        if (get_current_state() == STATE_REMOTE && !last_report_sent) {
+            // 这里可以根据需要添加逻辑
+        }
+        last_report_sent = 0;
+
         // If no events were processed, sleep briefly to avoid busy-waiting
         if (events_processed == 0) {
-            usleep(100); // 0.1ms sleep when idle - reduced from 1ms
+            usleep(100); // 0.1ms sleep when idle
         }
     }
 
     // Cleanup
-    close(client_fd);
-    close(server_fd);
     cleanup_state_machine();
     cleanup_input_capture();
+
+    if (uart_fd >= 0) {
+        close(uart_fd);
+    }
 
     printf("Server shutdown complete\n");
     return 0;

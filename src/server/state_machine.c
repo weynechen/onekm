@@ -20,23 +20,28 @@ int process_event(const InputEvent *event, Message *msg) {
         return 0;
     }
 
-    // Handle F12 as toggle (simple and reliable)
-    if (event->type == EV_KEY && event->code == KEY_F12 && event->value == 1) {
-        if (current_state == STATE_LOCAL) {
-            // Switch to remote control
-            current_state = STATE_REMOTE;
-            set_device_grab(1); // Grab devices so input doesn't affect local system
-            msg_switch(msg, 1); // 1 = switch to remote
-            printf("Switched to REMOTE control (F12 pressed)\n");
-            return 1;
-        } else {
-            // Switch to local control
-            current_state = STATE_LOCAL;
-            set_device_grab(0); // Ungrab devices so input affects local system again
-            msg_switch(msg, 0); // 0 = switch to local
-            printf("Switched to LOCAL control (F12 pressed)\n");
-            return 1;
+    // Handle F12 as toggle - 处理按下和释放两种事件
+    if (event->type == EV_KEY && event->code == KEY_F12) {
+        // 只在按下时处理（value == 1）
+        if (event->value == 1) {
+            if (current_state == STATE_LOCAL) {
+                // Switch to remote control
+                current_state = STATE_REMOTE;
+                set_device_grab(1); // Grab devices so input doesn't affect local system
+                msg_switch(msg, 1); // 1 = switch to remote
+                printf("Switched to REMOTE control (F12 pressed)\n");
+                return 1;
+            } else {
+                // Switch to local control
+                current_state = STATE_LOCAL;
+                set_device_grab(0); // Ungrab devices so input affects local system again
+                msg_switch(msg, 0); // 0 = switch to local
+                printf("Switched to LOCAL control (F12 pressed)\n");
+                return 1;
+            }
         }
+        // F12键的所有事件（包括释放）都返回1，表示已处理，不再传递
+        return 1;
     }
 
     // Process events based on current state
@@ -71,32 +76,21 @@ int process_event(const InputEvent *event, Message *msg) {
                 // Map Linux key codes to our protocol
                 // Left mouse button
                 if (event->code == BTN_LEFT) {
-                    printf("Server: BTN_LEFT %s\n", event->value ? "DOWN" : "UP");
                     msg_mouse_button(msg, 1, event->value);
                     return 1;
                 }
                 // Right mouse button
                 else if (event->code == BTN_RIGHT) {
-                    printf("Server: BTN_RIGHT %s\n", event->value ? "DOWN" : "UP");
                     msg_mouse_button(msg, 2, event->value);
                     return 1;
                 }
                 // Middle mouse button
                 else if (event->code == BTN_MIDDLE) {
-                    printf("Server: BTN_MIDDLE %s\n", event->value ? "DOWN" : "UP");
                     msg_mouse_button(msg, 3, event->value);
                     return 1;
                 }
-                // Keyboard events (but not Ctrl or F8)
-                else if (event->code < 256 && event->code != KEY_LEFTCTRL &&
-                         event->code != KEY_RIGHTCTRL && event->code != KEY_F8) {
-                    msg_key_event(msg, event->code, event->value);
-                    return 1;
-                }
-                // Debug unknown buttons
-                else {
-                    printf("Server: Unknown EV_KEY code=%d value=%d\n", event->code, event->value);
-                }
+                // 返回0，键盘事件在main.c中通过keyboard_state_process_key处理
+                return 0;
             }
             break;
     }
@@ -108,4 +102,8 @@ void cleanup_state_machine(void) {
     current_state = STATE_LOCAL;
     set_device_grab(0); // Ensure devices are ungrabbed on cleanup
     printf("State machine cleaned up\n");
+}
+
+ControlState get_current_state(void) {
+    return current_state;
 }

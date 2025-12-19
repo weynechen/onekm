@@ -1,0 +1,251 @@
+/*
+ * SPDX-FileCopyrightText: 2022-2025 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Unlicense OR CC0-1.0
+ */
+
+#include <stdlib.h>
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "tinyusb.h"
+#include "tinyusb_default_config.h"
+#include "class/hid/hid_device.h"
+#include "driver/gpio.h"
+
+#define APP_BUTTON (GPIO_NUM_0) // Use BOOT signal by default
+static const char *TAG = "example";
+
+/************* TinyUSB descriptors ****************/
+
+#define TUSB_DESC_TOTAL_LEN      (TUD_CONFIG_DESC_LEN + CFG_TUD_HID * TUD_HID_DESC_LEN)
+
+/**
+ * @brief HID report descriptor
+ *
+ * In this example we implement Keyboard + Mouse HID device,
+ * so we must define both report descriptors
+ */
+const uint8_t hid_report_descriptor[] = {
+    TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(HID_ITF_PROTOCOL_KEYBOARD)),
+    TUD_HID_REPORT_DESC_MOUSE(HID_REPORT_ID(HID_ITF_PROTOCOL_MOUSE))
+};
+
+/**
+ * @brief String descriptor
+ */
+const char* hid_string_descriptor[5] = {
+    // array of pointer to string descriptors
+    (char[]){0x09, 0x04},  // 0: is supported language is English (0x0409)
+    "TinyUSB",             // 1: Manufacturer
+    "TinyUSB Device",      // 2: Product
+    "123456",              // 3: Serials, should use chip ID
+    "Example HID interface",  // 4: HID
+};
+
+/**
+ * @brief Configuration descriptor
+ *
+ * This is a simple configuration descriptor that defines 1 configuration and 1 HID interface
+ */
+static const uint8_t hid_configuration_descriptor[] = {
+    // Configuration number, interface count, string index, total length, attribute, power in mA
+    TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+
+    // Interface number, string index, boot protocol, report descriptor len, EP In address, size & polling interval
+    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
+};
+
+/********* TinyUSB HID callbacks ***************/
+
+// Invoked when received GET HID REPORT DESCRIPTOR request
+// Application return pointer to descriptor, whose contents must exist long enough for transfer to complete
+uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
+{
+    // We use only one interface and one HID report descriptor, so we can ignore parameter 'instance'
+    return hid_report_descriptor;
+}
+
+// Invoked when received GET_REPORT control request
+// Application must fill buffer report's content and return its length.
+// Return zero will cause the stack to STALL request
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
+{
+    (void) instance;
+    (void) report_id;
+    (void) report_type;
+    (void) buffer;
+    (void) reqlen;
+
+    return 0;
+}
+
+// Invoked when received SET_REPORT control request or
+// received data on OUT endpoint ( Report ID = 0, Type = 0 )
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
+{
+}
+
+/********* Application ***************/
+
+typedef enum {
+    MOUSE_DIR_RIGHT,
+    MOUSE_DIR_DOWN,
+    MOUSE_DIR_LEFT,
+    MOUSE_DIR_UP,
+    MOUSE_DIR_MAX,
+} mouse_dir_t;
+
+#define DISTANCE_MAX        125
+#define DELTA_SCALAR        5
+
+static void mouse_draw_square_next_delta(int8_t *delta_x_ret, int8_t *delta_y_ret)
+{
+    static mouse_dir_t cur_dir = MOUSE_DIR_RIGHT;
+    static uint32_t distance = 0;
+
+    // Calculate next delta
+    if (cur_dir == MOUSE_DIR_RIGHT) {
+        *delta_x_ret = DELTA_SCALAR;
+        *delta_y_ret = 0;
+    } else if (cur_dir == MOUSE_DIR_DOWN) {
+        *delta_x_ret = 0;
+        *delta_y_ret = DELTA_SCALAR;
+    } else if (cur_dir == MOUSE_DIR_LEFT) {
+        *delta_x_ret = -DELTA_SCALAR;
+        *delta_y_ret = 0;
+    } else if (cur_dir == MOUSE_DIR_UP) {
+        *delta_x_ret = 0;
+        *delta_y_ret = -DELTA_SCALAR;
+    }
+
+    // Update cumulative distance for current direction
+    distance += DELTA_SCALAR;
+    // Check if we need to change direction
+    if (distance >= DISTANCE_MAX) {
+        distance = 0;
+        cur_dir++;
+        if (cur_dir == MOUSE_DIR_MAX) {
+            cur_dir = 0;
+        }
+    }
+}
+
+static void app_send_hid_demo(void)
+{
+    // === 键盘测试：输入 "abc" + Enter ===
+    ESP_LOGI(TAG, "=== Keyboard Test: typing 'abc' + Enter ===");
+
+    // Key 'a'
+    uint8_t key_a[6] = {HID_KEY_A};
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, key_a);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Key 'b'
+    uint8_t key_b[6] = {HID_KEY_B};
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, key_b);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Key 'c'
+    uint8_t key_c[6] = {HID_KEY_C};
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, key_c);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Key 'Enter'
+    uint8_t key_enter[6] = {HID_KEY_ENTER};
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, key_enter);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // === 鼠标测试：画正方形 ===
+    ESP_LOGI(TAG, "=== Mouse Test: drawing square ===");
+    int8_t delta_x;
+    int8_t delta_y;
+    for (int i = 0; i < (DISTANCE_MAX / DELTA_SCALAR) * 4; i++) {
+        mouse_draw_square_next_delta(&delta_x, &delta_y);
+        tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE, 0x00, delta_x, delta_y, 0, 0);
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // === 鼠标点击测试 ===
+    ESP_LOGI(TAG, "=== Mouse Test: left click ===");
+    tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE, 0x01, 0, 0, 0, 0);  // Left button down
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE, 0x00, 0, 0, 0, 0);  // Release
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // === 键盘组合键：Ctrl+A ===
+    ESP_LOGI(TAG, "=== Keyboard Test: Ctrl+A ===");
+    uint8_t key_a2[6] = {HID_KEY_A};
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, KEYBOARD_MODIFIER_LEFTCTRL, key_a2);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    tud_hid_keyboard_report(HID_ITF_PROTOCOL_KEYBOARD, 0, NULL);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    ESP_LOGI(TAG, "=== Test Complete - Waiting 3 seconds ===");
+}
+
+void app_main(void)
+{
+    // Initialize button that will trigger HID reports
+    const gpio_config_t boot_button_config = {
+        .pin_bit_mask = BIT64(APP_BUTTON),
+        .mode = GPIO_MODE_INPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+        .pull_up_en = true,
+        .pull_down_en = false,
+    };
+    ESP_ERROR_CHECK(gpio_config(&boot_button_config));
+
+    ESP_LOGI(TAG, "=== LanKM Hardware Test ===");
+    ESP_LOGI(TAG, "Press BOOT button to trigger test");
+    ESP_LOGI(TAG, "Testing: Keyboard + Mouse mixed input");
+
+    ESP_LOGI(TAG, "USB initialization");
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+
+    tusb_cfg.descriptor.device = NULL;
+    tusb_cfg.descriptor.full_speed_config = hid_configuration_descriptor;
+    tusb_cfg.descriptor.string = hid_string_descriptor;
+    tusb_cfg.descriptor.string_count = sizeof(hid_string_descriptor) / sizeof(hid_string_descriptor[0]);
+#if (TUD_OPT_HIGH_SPEED)
+    tusb_cfg.descriptor.high_speed_config = hid_configuration_descriptor;
+#endif // TUD_OPT_HIGH_SPEED
+
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+    ESP_LOGI(TAG, "USB initialization DONE");
+    ESP_LOGI(TAG, "Waiting for USB connection to Windows...");
+
+    // 等待 USB 连接
+    while (!tud_mounted()) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(TAG, "USB connected! Press BOOT button to start test");
+
+    while (1) {
+        if (tud_mounted()) {
+            // 按下 BOOT 按钮触发测试
+            if (gpio_get_level(APP_BUTTON) == 0) {
+                ESP_LOGI(TAG, "Button pressed - starting test sequence");
+                app_send_hid_demo();
+                ESP_LOGI(TAG, "Test complete. Press BOOT button again for next cycle");
+                vTaskDelay(pdMS_TO_TICKS(1000)); // 防止重复触发
+            }
+        } else {
+            ESP_LOGI(TAG, "USB disconnected, waiting for reconnection...");
+            while (!tud_mounted()) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            ESP_LOGI(TAG, "USB reconnected!");
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
