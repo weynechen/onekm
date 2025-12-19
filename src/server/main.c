@@ -221,6 +221,7 @@ int main(int argc, char *argv[]) {
     int heartbeat_delay = 0;  // Counter for delay between press and release
     const time_t heartbeat_interval = 30; // Send heartbeat every 30 seconds
     const int heartbeat_key_delay = 1000; // About 100ms delay (1000 * 0.1ms)
+    int heartbeat_pending = 0;  // Flag indicating if we have a pending key press
 
     // Mouse movement flush timer
     struct timespec last_mouse_flush = {0, 0};
@@ -246,6 +247,7 @@ int main(int argc, char *argv[]) {
                     memset(&keyboard_report, 0, sizeof(HIDKeyboardReport));
                     msg_keyboard_report(&msg, &keyboard_report);
                     send_message(&msg);
+                    heartbeat_pending = 0;  // Clear pending flag
                 }
 
                 events_processed++; // Count this as activity to avoid sleep
@@ -258,6 +260,7 @@ int main(int argc, char *argv[]) {
 
                 // Set delay before release (about 100ms)
                 heartbeat_delay = heartbeat_key_delay;
+                heartbeat_pending = 1;  // Mark that we have a pending key press
                 last_heartbeat = current_time;
                 events_processed++;
             }
@@ -267,6 +270,18 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < 20; i++) {
             InputEvent event;
             if (capture_input(&event) == 0) {
+                // Check if switching from LOCAL to REMOTE with pending heartbeat
+                if (event.type == EV_KEY && event.code == KEY_F12 && event.value == 1 &&
+                    get_current_state() == STATE_LOCAL && heartbeat_pending) {
+                    // We have a pending Shift key press, send release before switch
+                    printf("[HEARTBEAT] Clearing pending Shift key before mode switch\n");
+                    memset(&keyboard_report, 0, sizeof(HIDKeyboardReport));
+                    msg_keyboard_report(&msg, &keyboard_report);
+                    send_message(&msg);
+                    heartbeat_delay = 0;
+                    heartbeat_pending = 0;
+                }
+
                 // Process through state machine
                 if (process_event(&event, &msg)) {
                     // Send message
