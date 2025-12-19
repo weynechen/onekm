@@ -38,6 +38,8 @@ static const int UART_BAUD_RATE = 230400;  // 波特率（可修改为230400等�
 typedef struct {
     int16_t x;              // X 位移（累积值）
     int16_t y;              // Y 位移（累积值）
+    int8_t vertical_wheel;  // 垂直滚轮（累积值）
+    int8_t horizontal_wheel; // 水平滚轮（累积值）
     uint8_t buttons;        // 按键位掩码 (bit0=左, bit1=右, bit2=中)
     bool changed;           // 状态变化标志
 } mouse_state_t;
@@ -122,6 +124,10 @@ typedef struct {
             uint8_t state;  // 控制状态（0=本地，1=远程）
             uint8_t padding[3]; // 填充
         } control;
+        struct {
+            int16_t vertical;   // 垂直滚轮
+            int16_t horizontal; // 水平滚轮
+        } mouse_wheel;
     } data;
 } __attribute__((packed)) input_message_t;
 
@@ -129,7 +135,8 @@ enum MessageType {
     MSG_MOUSE_MOVE = 0x01,
     MSG_MOUSE_BUTTON = 0x02,
     MSG_KEYBOARD_REPORT = 0x03,
-    MSG_SWITCH = 0x04
+    MSG_SWITCH = 0x04,
+    MSG_MOUSE_WHEEL = 0x05
 };
 
 /************* UART 接收任务 ***************/
@@ -181,6 +188,19 @@ static void uart_receive_task(void *pvParameters)
                                      msg.data.mouse_button.button, msg.data.mouse_button.state);
                             break;
 
+                        case MSG_MOUSE_WHEEL:
+                            xSemaphoreTake(state_mutex, portMAX_DELAY);
+                            // Accumulate wheel movement
+                            mouse_state.vertical_wheel += msg.data.mouse_wheel.vertical;
+                            mouse_state.horizontal_wheel += msg.data.mouse_wheel.horizontal;
+                            mouse_state.changed = true;
+                            xSemaphoreGive(state_mutex);
+                            xSemaphoreGive(hid_update_sem);
+                            ESP_LOGD(TAG, "Mouse wheel: vertical=%d, horizontal=%d, accumulated: v=%d, h=%d",
+                                     msg.data.mouse_wheel.vertical, msg.data.mouse_wheel.horizontal,
+                                     mouse_state.vertical_wheel, mouse_state.horizontal_wheel);
+                            break;
+
                         case MSG_KEYBOARD_REPORT:
                             // 直接复制键盘报告
                             xSemaphoreTake(state_mutex, portMAX_DELAY);
@@ -203,6 +223,8 @@ static void uart_receive_task(void *pvParameters)
                             xSemaphoreTake(state_mutex, portMAX_DELAY);
                             mouse_state.x = 0;
                             mouse_state.y = 0;
+                            mouse_state.vertical_wheel = 0;
+                            mouse_state.horizontal_wheel = 0;
                             mouse_state.changed = false;
                             xSemaphoreGive(state_mutex);
 
@@ -261,15 +283,21 @@ static void hid_send_task(void *pvParameters)
                 // 将int16_t转换为int8_t（TinyUSB API需要int8_t）
                 int8_t dx = (int8_t)(mouse_local.x > 127 ? 127 : (mouse_local.x < -128 ? -128 : mouse_local.x));
                 int8_t dy = (int8_t)(mouse_local.y > 127 ? 127 : (mouse_local.y < -128 ? -128 : mouse_local.y));
+                // 滚轮直接使用int8_t值（无需转换）
+                int8_t vertical_wheel = mouse_local.vertical_wheel;
+                int8_t horizontal_wheel = mouse_local.horizontal_wheel;
 
                 tud_hid_mouse_report(HID_ITF_PROTOCOL_MOUSE,
-                    mouse_local.buttons, dx, dy, 0, 0);
-                ESP_LOGV(TAG, "Sent mouse report: dx=%d, dy=%d", dx, dy);
+                    mouse_local.buttons, dx, dy, vertical_wheel, horizontal_wheel);
+                ESP_LOGV(TAG, "Sent mouse report: dx=%d, dy=%d, wheel_v=%d, wheel_h=%d",
+                         dx, dy, vertical_wheel, horizontal_wheel);
 
                 // 减去已发送的值（保留未发送的部分）
                 xSemaphoreTake(state_mutex, portMAX_DELAY);
                 mouse_state.x -= dx;
                 mouse_state.y -= dy;
+                mouse_state.vertical_wheel = 0;
+                mouse_state.horizontal_wheel = 0;
                 // 如果已经发送完所有累积值，清除changed标志
                 if ((mouse_state.x == 0 && mouse_state.y == 0) || !is_remote_mode) {
                     mouse_state.changed = false;
