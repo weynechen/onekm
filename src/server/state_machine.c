@@ -5,6 +5,8 @@
 #include <linux/input.h>
 
 static ControlState current_state = STATE_LOCAL;
+static int exit_requested = 0;
+static int ctrl_pressed = 0;
 
 // Note: KEY_PAUSE is used for mode switching - defined in linux/input.h as 119
 
@@ -50,6 +52,19 @@ int flush_pending_mouse_movement(Message *msg) {
 int process_event(const InputEvent *event, Message *msg) {
     if (!event || !msg) {
         return 0;
+    }
+
+    // Track Ctrl key state for Ctrl+C detection in LOCAL mode
+    if (event->type == EV_KEY) {
+        if (event->code == KEY_LEFTCTRL || event->code == KEY_RIGHTCTRL) {
+            ctrl_pressed = (event->value == 1 || event->value == 2); // 1=press, 2=repeat
+        }
+        // Check for Ctrl+C combination in LOCAL mode
+        if (current_state == STATE_LOCAL && event->code == KEY_C && event->value == 1 && ctrl_pressed) {
+            printf("Ctrl+C detected in LOCAL mode - requesting exit\n");
+            exit_requested = 1;
+            return 0;
+        }
     }
 
     // Handle PAUSE/Break as toggle - 处理按下和释放两种事件
@@ -169,4 +184,8 @@ void cleanup_state_machine(void) {
 
 ControlState get_current_state(void) {
     return current_state;
+}
+
+int should_exit(void) {
+    return exit_requested;
 }

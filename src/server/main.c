@@ -227,6 +227,12 @@ int main(int argc, char *argv[]) {
     struct timespec last_mouse_flush = {0, 0};
 
     while (running) {
+        // Check if exit was requested (e.g., Ctrl+C in LOCAL mode)
+        if (should_exit()) {
+            printf("Exit requested, shutting down...\n");
+            break;
+        }
+
         int events_processed = 0;
         struct timespec current_ts;
         clock_gettime(CLOCK_MONOTONIC, &current_ts);
