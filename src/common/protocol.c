@@ -30,3 +30,11 @@ void msg_switch(Message *msg, uint8_t state) {
         msg->data.control.state = state;
     }
 }
+
+void msg_mouse_wheel(Message *msg, int16_t vertical, int16_t horizontal) {
+    if (msg) {
+        msg->type = MSG_MOUSE_WHEEL;
+        msg->data.mouse_wheel.vertical = vertical;
+        msg->data.mouse_wheel.horizontal = horizontal;
+    }
+}

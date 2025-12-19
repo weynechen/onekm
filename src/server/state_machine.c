@@ -9,6 +9,10 @@ static ControlState current_state = STATE_LOCAL;
 // Key codes for toggle - using F12 to avoid Alt key issues
 #define KEY_F12 88
 
+// Linux input event codes for mouse wheel
+#define REL_WHEEL       0x08
+#define REL_HWHEEL      0x06
+
 void init_state_machine(void) {
     current_state = STATE_LOCAL;
     printf("State machine initialized in LOCAL mode\n");
@@ -127,6 +131,31 @@ int process_event(const InputEvent *event, Message *msg) {
                 }
                 // 返回0，键盘事件在main.c中通过keyboard_state_process_key处理
                 return 0;
+            } else if (event->type == EV_REL && (event->code == REL_WHEEL || event->code == REL_HWHEEL)) {
+                // Mouse wheel events - send immediately
+                int16_t vertical = 0;
+                int16_t horizontal = 0;
+
+                if (event->code == REL_WHEEL) {
+                    vertical = -event->value; // Linux typically sends positive for down, HID expects positive for up
+                    printf("[WHEEL] Vertical scroll: raw=%d, converted=%d\n", event->value, vertical);
+                } else {
+                    horizontal = event->value;
+                    printf("[WHEEL] Horizontal scroll: value=%d\n", horizontal);
+                }
+
+                // Send any pending mouse movement first, then wheel event
+                if (pending_dx != 0 || pending_dy != 0) {
+                    // If we have pending movement, send it now
+                    printf("[WHEEL] Sending pending mouse movement first\n");
+                    send_pending_movement(msg);
+                    // But we still need to handle the wheel event, so don't return yet
+                } else {
+                    // No pending movement, send wheel event
+                    msg_mouse_wheel(msg, vertical, horizontal);
+                    printf("[WHEEL] Sent wheel event: vertical=%d, horizontal=%d\n", vertical, horizontal);
+                }
+                return 1;
             }
             break;
     }

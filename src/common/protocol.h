@@ -30,6 +30,10 @@ typedef struct {
             uint8_t state;  // 控制状态（0=本地，1=远程）
             uint8_t padding[3]; // 填充
         } control;
+        struct {
+            int16_t vertical;   // 垂直滚轮（通常为正=向上，负=向下）
+            int16_t horizontal; // 水平滚轮（通常为正=向右，负=向左）
+        } mouse_wheel;
     } data;
 } Message;
 
@@ -40,7 +44,8 @@ enum MessageType {
     MSG_MOUSE_MOVE = 0x01,
     MSG_MOUSE_BUTTON = 0x02,
     MSG_KEYBOARD_REPORT = 0x03,  // 发送完整的HID键盘报告
-    MSG_SWITCH = 0x04
+    MSG_SWITCH = 0x04,
+    MSG_MOUSE_WHEEL = 0x05       // 鼠标滚轮事件
 };
 
 // 鼠标按键定义
@@ -77,6 +82,7 @@ void msg_mouse_move(Message *msg, int16_t dx, int16_t dy);
 void msg_mouse_button(Message *msg, uint8_t button, uint8_t state);
 void msg_keyboard_report(Message *msg, const HIDKeyboardReport *report);
 void msg_switch(Message *msg, uint8_t state);
+void msg_mouse_wheel(Message *msg, int16_t vertical, int16_t horizontal);
 
 // Legacy function (removed - no longer needed)
 // void msg_key_event(Message *msg, uint16_t keycode, uint8_t state);
