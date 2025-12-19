@@ -181,8 +181,13 @@ int main(int argc, char *argv[]) {
     const time_t heartbeat_interval = 30; // Send heartbeat every 30 seconds
     const int heartbeat_key_delay = 1000; // About 100ms delay (1000 * 0.1ms)
 
+    // Mouse movement flush timer
+    struct timespec last_mouse_flush = {0, 0};
+
     while (running) {
         int events_processed = 0;
+        struct timespec current_ts;
+        clock_gettime(CLOCK_MONOTONIC, &current_ts);
 
         // Check for heartbeat in LOCAL mode
         if (get_current_state() == STATE_LOCAL) {
@@ -246,6 +251,23 @@ int main(int argc, char *argv[]) {
             // 这里可以根据需要添加逻辑
         }
         last_report_sent = 0;
+
+        // Flush pending mouse movement if no events for a while
+        if (events_processed == 0) {
+            // Check if we should flush pending mouse movement (after 5ms of inactivity)
+            long time_since_flush = (current_ts.tv_sec - last_mouse_flush.tv_sec) * 1000000 +
+                                   (current_ts.tv_nsec - last_mouse_flush.tv_nsec) / 1000;
+            if (time_since_flush > 5000) { // 5ms
+                if (flush_pending_mouse_movement(&msg)) {
+                    send_message(&msg);
+                    events_processed++; // Count this as activity to avoid sleep
+                }
+                last_mouse_flush = current_ts;
+            }
+        } else {
+            // Update flush timer when events are processed
+            last_mouse_flush = current_ts;
+        }
 
         // If no events were processed, sleep briefly to avoid busy-waiting
         if (events_processed == 0) {

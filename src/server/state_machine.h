@@ -11,6 +11,7 @@ typedef enum {
 
 void init_state_machine(void);
 int process_event(const InputEvent *event, Message *msg);
+int flush_pending_mouse_movement(Message *msg);
 void cleanup_state_machine(void);
 ControlState get_current_state(void);
 

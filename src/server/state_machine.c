@@ -15,6 +15,26 @@ void init_state_machine(void) {
     printf("Press F12 to toggle between LOCAL and REMOTE control\n");
 }
 
+// 静态变量用于鼠标移动的累积
+static int pending_dx = 0;
+static int pending_dy = 0;
+static int last_event_type = -1;
+
+static int send_pending_movement(Message *msg) {
+    if (pending_dx != 0 || pending_dy != 0) {
+        msg_mouse_move(msg, pending_dx, pending_dy);
+        pending_dx = 0;
+        pending_dy = 0;
+        last_event_type = -1;
+        return 1;
+    }
+    return 0;
+}
+
+int flush_pending_mouse_movement(Message *msg) {
+    return send_pending_movement(msg);
+}
+
 int process_event(const InputEvent *event, Message *msg) {
     if (!event || !msg) {
         return 0;
@@ -24,20 +44,23 @@ int process_event(const InputEvent *event, Message *msg) {
     if (event->type == EV_KEY && event->code == KEY_F12) {
         // 只在按下时处理（value == 1）
         if (event->value == 1) {
+            // 在切换模式前发送待处理的鼠标移动
+            int sent = send_pending_movement(msg);
+
             if (current_state == STATE_LOCAL) {
                 // Switch to remote control
                 current_state = STATE_REMOTE;
                 set_device_grab(1); // Grab devices so input doesn't affect local system
                 msg_switch(msg, 1); // 1 = switch to remote
                 printf("Switched to REMOTE control (F12 pressed)\n");
-                return 1;
+                return sent ? 1 : 1; // Always return 1 for F12
             } else {
                 // Switch to local control
                 current_state = STATE_LOCAL;
                 set_device_grab(0); // Ungrab devices so input affects local system again
                 msg_switch(msg, 0); // 0 = switch to local
                 printf("Switched to LOCAL control (F12 pressed)\n");
-                return 1;
+                return sent ? 1 : 1; // Always return 1 for F12
             }
         }
         // F12键的所有事件（包括释放）都返回1，表示已处理，不再传递
@@ -54,25 +77,28 @@ int process_event(const InputEvent *event, Message *msg) {
             // Send events to remote client
             if (event->type == EV_REL) {
                 if (event->code == REL_X || event->code == REL_Y) {
-                    static int pending_dx = 0, pending_dy = 0;
-
+                    // Accumulate mouse movement
                     if (event->code == REL_X) {
-                        pending_dx = event->value;
-                        if (pending_dx != 0) {
-                            msg_mouse_move(msg, pending_dx, pending_dy);
-                            pending_dy = 0; // Reset dy after sending
-                            return 1;
-                        }
+                        pending_dx += event->value;
                     } else if (event->code == REL_Y) {
-                        pending_dy = event->value;
-                        if (pending_dy != 0) {
-                            msg_mouse_move(msg, pending_dx, pending_dy);
-                            pending_dx = 0; // Reset dx after sending
-                            return 1;
-                        }
+                        pending_dy += event->value;
                     }
+
+                    // Send immediately if we have movement in both axes
+                    // or if the same axis event occurs twice in a row (rapid movement)
+                    if ((pending_dx != 0 && pending_dy != 0) ||
+                        (last_event_type == event->code && (pending_dx != 0 || pending_dy != 0))) {
+                        int result = send_pending_movement(msg);
+                        return result;
+                    }
+
+                    last_event_type = event->code;
                 }
             } else if (event->type == EV_KEY) {
+                // For non-movement events, send any pending mouse movement first
+                if (pending_dx != 0 || pending_dy != 0) {
+                    send_pending_movement(msg);
+                }
                 // Map Linux key codes to our protocol
                 // Left mouse button
                 if (event->code == BTN_LEFT) {
