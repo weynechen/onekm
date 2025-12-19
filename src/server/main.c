@@ -23,21 +23,18 @@
 
 static int running = 1;
 static int uart_fd = -1;
-static struct termios saved_termios;  // 保存原始的终端设置
+static struct termios saved_termios;
 
-// 设置终端为raw模式
 static void set_raw_terminal_mode(void) {
     struct termios raw;
     tcgetattr(STDIN_FILENO, &saved_termios);
     raw = saved_termios;
-    raw.c_lflag &= ~(ECHO | ICANON);  // 清除ECHO和ICANON
-    raw.c_lflag |= ISIG;  // 显式确保ISIG被设置，允许Ctrl+C
-    // 确保中断字符是Ctrl+C
-    raw.c_cc[VINTR] = 3;  // Ctrl+C
+    raw.c_lflag &= ~(ECHO | ICANON);
+    raw.c_lflag |= ISIG;
+    raw.c_cc[VINTR] = 3;
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-// 恢复终端设置
 static void restore_terminal_mode(void) {
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
 }
@@ -52,7 +49,6 @@ void signal_handler(int sig) {
 // Emergency cleanup handler - called on abnormal termination
 void emergency_cleanup(void) {
     printf("\nEmergency cleanup - releasing all input devices...\n");
-    // 恢复终端
     restore_terminal_mode();
     // Force ungrab all devices
     set_device_grab(0);
@@ -210,7 +206,6 @@ int main(int argc, char *argv[]) {
     printf("Ready. Press KEY_PAUSE to toggle LOCAL/REMOTE mode\n");
     printf("Press Ctrl+C to shutdown\n");
 
-    // 设置终端为raw模式
     set_raw_terminal_mode();
     printf("Terminal set to raw mode (Ctrl+C enabled)\n");
 
@@ -301,9 +296,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // 如果有键盘状态改变但未发送（比如快速连续按键），立即发送
         if (get_current_state() == STATE_REMOTE && !last_report_sent) {
-            // 这里可以根据需要添加逻辑
         }
         last_report_sent = 0;
 

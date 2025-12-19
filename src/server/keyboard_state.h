@@ -4,16 +4,12 @@
 #include <stdint.h>
 #include "common/protocol.h"
 
-// 初始化键盘状态
 void keyboard_state_init(void);
 
-// 处理Linux键码事件，返回是否需要发送HID报告
 int keyboard_state_process_key(uint16_t linux_keycode, uint8_t value, HIDKeyboardReport *report);
 
-// 清理键盘状态（释放所有按键）
 void keyboard_state_reset(HIDKeyboardReport *report);
 
-// 修饰键位定义（与protocol.h一致）
 #define MODIFIER_LEFT_CTRL   0x01
 #define MODIFIER_LEFT_SHIFT  0x02
 #define MODIFIER_LEFT_ALT    0x04

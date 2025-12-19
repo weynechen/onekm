@@ -20,7 +20,6 @@ void init_state_machine(void) {
     printf("Press PAUSE/Break to toggle between LOCAL and REMOTE control\n");
 }
 
-// 静态变量用于鼠标移动的累积
 static int pending_dx = 0;
 static int pending_dy = 0;
 static int last_event_type = -1;
@@ -67,11 +66,9 @@ int process_event(const InputEvent *event, Message *msg) {
         }
     }
 
-    // Handle PAUSE/Break as toggle - 处理按下和释放两种事件
+    // Handle PAUSE/Break as toggle
     if (event->type == EV_KEY && event->code == KEY_PAUSE) {
-        // 只在按下时处理（value == 1）
         if (event->value == 1) {
-            // 在切换模式前发送待处理的鼠标移动
             // int sent = send_pending_movement(msg);
 
             printf("PAUSE pressed, current_state=%d\n", current_state);
@@ -91,7 +88,6 @@ int process_event(const InputEvent *event, Message *msg) {
                 return 1; // Always return 1 to indicate message was prepared
             }
         }
-        // PAUSE键的所有事件（包括释放）都返回1，表示已处理，不再传递
         return 1;
     }
 

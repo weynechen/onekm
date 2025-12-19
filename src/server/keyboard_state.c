@@ -1,7 +1,6 @@
 #include "keyboard_state.h"
 #include <string.h>
 
-// Linux evdev键码到HID键码的映射表
 static const uint8_t linux_to_hid_keymap[256] = {
     [0] = 0,
     [1] = 41,      // KEY_ESC -> ESC
@@ -90,14 +89,12 @@ static const uint8_t linux_to_hid_keymap[256] = {
     [111] = 76     // KEY_DELETE -> Delete
 };
 
-// 当前键盘状态
 static HIDKeyboardReport current_report = {0};
 
 void keyboard_state_init(void) {
     memset(&current_report, 0, sizeof(HIDKeyboardReport));
 }
 
-// 查找按键在数组中的位置
 static int find_key_in_report(uint8_t keycode) {
     for (int i = 0; i < 6; i++) {
         if (current_report.keys[i] == keycode) {
@@ -107,11 +104,9 @@ static int find_key_in_report(uint8_t keycode) {
     return -1;
 }
 
-// 从报告中移除按键
 static void remove_key_from_report(uint8_t keycode) {
     int pos = find_key_in_report(keycode);
     if (pos >= 0) {
-        // 将后面的按键前移
         for (int i = pos; i < 5; i++) {
             current_report.keys[i] = current_report.keys[i + 1];
         }
@@ -119,14 +114,11 @@ static void remove_key_from_report(uint8_t keycode) {
     }
 }
 
-// 向报告中添加按键
 static int add_key_to_report(uint8_t keycode) {
-    // 如果已经存在，直接返回
     if (find_key_in_report(keycode) >= 0) {
         return 0;
     }
 
-    // 查找空槽位
     for (int i = 0; i < 6; i++) {
         if (current_report.keys[i] == 0) {
             current_report.keys[i] = keycode;
@@ -134,7 +126,6 @@ static int add_key_to_report(uint8_t keycode) {
         }
     }
 
-    // 没有空槽位
     return -1;
 }
 
@@ -145,14 +136,12 @@ int keyboard_state_process_key(uint16_t linux_keycode, uint8_t value, HIDKeyboar
 
     uint8_t hid_keycode = linux_to_hid_keymap[linux_keycode];
 
-    // 如果没有映射，忽略
-    if (hid_keycode == 0 && linux_keycode != 57) {  // 57 是空格键
+    if (hid_keycode == 0 && linux_keycode != 57) {
         return 0;
     }
 
     int state_changed = 0;
 
-    // 判断是否为修饰键
     switch (hid_keycode) {
         case 224:  // LCtrl
             if (value) current_report.modifiers |= MODIFIER_LEFT_CTRL;
@@ -185,21 +174,17 @@ int keyboard_state_process_key(uint16_t linux_keycode, uint8_t value, HIDKeyboar
             state_changed = 1;
             break;
         default:
-            // 普通按键
             if (value) {
-                // 按键按下
                 if (add_key_to_report(hid_keycode) > 0) {
                     state_changed = 1;
                 }
             } else {
-                // 按键释放
                 remove_key_from_report(hid_keycode);
                 state_changed = 1;
             }
             break;
     }
 
-    // 如果状态改变，复制当前状态
     if (state_changed) {
         memcpy(report, &current_report, sizeof(HIDKeyboardReport));
         return 1;
