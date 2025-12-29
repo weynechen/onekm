@@ -242,11 +242,15 @@ int main(int argc, char *argv[]) {
                 // Initialize heartbeat timer
                 last_heartbeat = current_time;
             } else if (heartbeat_mouse_moved > 0) {
+
+                // Mouse move back and forth
+                int xy_move = (heartbeat_mouse_moved % 2 == 0) ? 1 : -1;
+
                 // Mouse is currently moving (send small movements over time)
                 heartbeat_mouse_moved--;
 
                 // Send small mouse movement
-                msg_mouse_move(&msg, 1, 1); // Move 1px diagonal
+                msg_mouse_move(&msg, xy_move, xy_move); // Move 1px diagonal
                 send_message(&msg);
                 events_processed++; // Count this as activity to avoid sleep
 
