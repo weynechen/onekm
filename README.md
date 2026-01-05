@@ -1,8 +1,8 @@
-# OneKM - LAN Keyboard & Mouse Controller (Hardware-based)
+# OneKM - Shared Keyboard & Mouse Controller (Hardware-based)
 
 [中文文档](docs/README.zh-CN.md)
 
-OneKM (LAN Keyboard & Mouse) is a lightweight LAN keyboard and mouse sharing system implemented with a hardware-based solution for cross-platform control.
+OneKM (Shared Keyboard & Mouse) is a lightweight keyboard and mouse sharing system implemented with a hardware-based solution for cross-platform control.
 
 **Note:** Currently, only Linux is supported as the host.
 

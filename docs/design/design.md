@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-**OneKM** (LAN Keyboard & Mouse) 是一个基于硬件的局域网键盘鼠标共享系统。
+**OneKM** (Shared Keyboard & Mouse) 是一个基于硬件的局域网键盘鼠标共享系统。
 
 ### 1.1 核心优势
 

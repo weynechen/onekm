@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OneKM is a lightweight LAN keyboard and mouse sharing system that allows controlling multiple computers with a single keyboard and mouse.
+OneKM is a lightweight keyboard and mouse sharing system that allows controlling multiple computers with a single keyboard and mouse.
 
 **Architecture:**
 - **Control Server (Linux only)**: Captures physical input devices and sends to ESP32 via UART
@@ -73,7 +73,7 @@ sudo ./build/onekm-server /dev/ttyACM0 921600    # Maximum speed
 - Hardware-based injection bypasses Windows software restrictions
 - Minimal latency (<3ms) via direct USB HID
 - Binary protocol for efficiency
-- No authentication needed (trusted LAN + hardware)
+- No authentication needed (hardware)
 
 ## Development Notes
 

@@ -1,8 +1,8 @@
-# OneKM - LAN 键盘鼠标控制器（硬件方案）
+# OneKM - 键盘鼠标控制器（硬件方案）
 
 [English Documentation](README.md)
 
-OneKM（LAN Keyboard & Mouse）是一个轻量级的局域网键盘鼠标共享系统，采用硬件方案实现跨平台控制。
+OneKM（Shared Keyboard & Mouse）是一个轻量级的局域网键盘鼠标共享系统，采用硬件方案实现跨平台控制。
 
 **注意：** 目前仅支持 Linux 作为主机端。
 
