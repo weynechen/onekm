@@ -10,6 +10,7 @@ typedef enum {
 } ControlState;
 
 void init_state_machine(void);
+void reset_keyboard_on_switch(void);
 int process_event(const InputEvent *event, Message *msg);
 int flush_pending_mouse_movement(Message *msg);
 void cleanup_state_machine(void);

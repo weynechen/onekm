@@ -108,8 +108,13 @@ int capture_input(InputEvent *event) {
             //            ev.type, ev.code, ev.value, libevdev_get_name(devices[i]));
             // }
 
-            // Filter out SYN_REPORT events
-            if (ev.type == EV_SYN) {
+            // Filter out SYN_REPORT and other non-keyboard/non-mouse events
+            if (ev.type == EV_SYN || ev.type == EV_MSC) {
+                continue;
+            }
+
+            // Only accept keyboard and mouse events
+            if (ev.type != EV_KEY && ev.type != EV_REL) {
                 continue;
             }
 

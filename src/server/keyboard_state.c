@@ -147,6 +147,10 @@ int keyboard_state_process_key(uint16_t linux_keycode, uint8_t value, HIDKeyboar
         return 0;
     }
 
+    if (value) {
+        fprintf(stderr, "[DEBUG] Key: linux=%u hid=%u\n", linux_keycode, hid_keycode);
+    }
+
     int state_changed = 0;
 
     switch (hid_keycode) {
