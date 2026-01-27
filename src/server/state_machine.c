@@ -29,7 +29,7 @@ void init_state_machine(void) {
 void reset_keyboard_on_switch(void) {
     printf("[SYNC] Synchronizing keyboard state with hardware...\n");
     
-    // Perform key synchronization
+    // Perform key synchronization (inject release events for stuck keys)
     int synced = key_sync_on_mode_switch();
     
     if (synced < 0) {
@@ -39,6 +39,10 @@ void reset_keyboard_on_switch(void) {
         // Give system time to process the injected events
         usleep(10000);
     }
+    
+    // Reset our internal keyboard state to match reality
+    // This ensures next REMOTE session starts with clean state
+    keyboard_state_reset(NULL);
 }
 
 static int pending_dx = 0;
@@ -102,6 +106,14 @@ int process_event(const InputEvent *event, Message *msg) {
                 // Switch to remote control
                 current_state = STATE_REMOTE;
                 set_device_grab(1); // Grab devices so input doesn't affect local system
+                
+                // IMPORTANT: After grab, immediately check for stuck keys
+                // Any key that was pressed during the grab transition will be stuck
+                // on LOCAL. We must release them now, not when switching back.
+                usleep(5000); // Wait for grab to fully take effect
+                printf("[SYNC] Post-grab: checking for stuck keys on LOCAL...\n");
+                key_sync_on_mode_switch();
+                
                 msg_switch(msg, 1); // 1 = switch to remote
                 printf("Switching to REMOTE control, sending SWITCH message\n");
                 return 1; // Always return 1 to indicate message was prepared
@@ -110,7 +122,11 @@ int process_event(const InputEvent *event, Message *msg) {
                 current_state = STATE_LOCAL;
                 set_device_grab(0); // Ungrab devices so input affects local system again
                 
-                // Synchronize keyboard state after ungrab
+                // Wait a bit for ungrab to fully take effect
+                usleep(5000);
+                
+                // Synchronize keyboard state - release any keys that were
+                // pressed in REMOTE mode but released before switching back
                 reset_keyboard_on_switch();
                 
                 msg_switch(msg, 0); // 0 = switch to local
