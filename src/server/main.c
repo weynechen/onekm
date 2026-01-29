@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <stdarg.h>
 #include <linux/input.h>
+#include <linux/input-event-codes.h>
 #include <time.h>
 #include <sched.h>
 #include <pthread.h>
@@ -178,6 +179,7 @@ int main(int argc, char *argv[]) {
     time_t last_heartbeat = 0;
     const time_t heartbeat_interval = 30;
     int heartbeat_mouse_moved = 0;
+    int heartbeat_suspended = 0;  /* set when remote lock (Win+L) sent; cleared when entering REMOTE */
 
     struct timespec last_mouse_flush = {0, 0};
 
@@ -199,10 +201,15 @@ int main(int argc, char *argv[]) {
         int events_processed = 0;
         ControlState current_state = get_current_state();
 
+        /* Clear remote-lock heartbeat suspension when using remote again */
+        if (current_state == STATE_REMOTE) {
+            heartbeat_suspended = 0;
+        }
+
         if (current_state == STATE_LOCAL) {
             time_t current_time = time(NULL);
 
-            if (heartbeat_mouse_moved > 0) {
+            if (!heartbeat_suspended && heartbeat_mouse_moved > 0) {
                 int xy_move = (heartbeat_mouse_moved % 2 == 0) ? 1 : -1;
                 heartbeat_mouse_moved--;
                 msg_mouse_move(&msg, xy_move, xy_move);
@@ -212,9 +219,9 @@ int main(int argc, char *argv[]) {
                 if (heartbeat_mouse_moved == 0) {
                     printf("[HEARTBEAT] Mouse movement heartbeat sent\n");
                 }
-            } else if (last_heartbeat == 0) {
+            } else if (!heartbeat_suspended && last_heartbeat == 0) {
                 last_heartbeat = current_time;
-            } else if (current_time - last_heartbeat >= heartbeat_interval) {
+            } else if (!heartbeat_suspended && current_time - last_heartbeat >= heartbeat_interval) {
                 printf("[HEARTBEAT] Starting mouse movement heartbeat\n");
                 heartbeat_mouse_moved = 5;
                 last_heartbeat = current_time;
@@ -270,6 +277,27 @@ int main(int argc, char *argv[]) {
                 if (capture_input(&event) == 0) {
                     if (event.type == EV_KEY && event.code == KEY_PAUSE && event.value == 1) {
                         process_event(&event, &msg);
+                    } else if (event.type == EV_KEY && event.code == KEY_L && event.value == 1) {
+                        /* Detect Win+L in LOCAL: send lock to remote and stop wake heartbeat */
+                        uint8_t key_states[32];
+                        if (get_hardware_keyboard_state(key_states) == 0) {
+                            int win_pressed = (key_states[KEY_LEFTMETA / 8] >> (KEY_LEFTMETA % 8)) & 1;
+                            win_pressed |= (key_states[KEY_RIGHTMETA / 8] >> (KEY_RIGHTMETA % 8)) & 1;
+                            if (win_pressed) {
+                                HIDKeyboardReport lock_press = {0};
+                                lock_press.modifiers = MODIFIER_LEFT_GUI;
+                                lock_press.keys[0] = 15;  /* HID usage for L */
+                                msg_keyboard_report(&msg, &lock_press);
+                                send_message(&msg);
+                                events_processed++;
+                                HIDKeyboardReport lock_release = {0};
+                                msg_keyboard_report(&msg, &lock_release);
+                                send_message(&msg);
+                                events_processed++;
+                                heartbeat_suspended = 1;
+                                printf("[LOCK] Win+L sent to remote, wake heartbeat suspended\n");
+                            }
+                        }
                     }
                 }
             }
