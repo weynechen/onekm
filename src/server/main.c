@@ -40,8 +40,9 @@ static int    pause_count      = 0;
 static time_t last_pause_time  = 0;
 
 /* Win+L tracking */
-static int meta_held    = 0;   /* is Left/Right Meta currently held in LOCAL mode? */
+static int meta_held     = 0;  /* is Left/Right Meta currently held in LOCAL mode? */
 static int remote_locked = 0;  /* Win+L was sent; suspend heartbeat until REMOTE */
+static int local_locked  = 0;  /* Win+L triggered local lock; suspend screensaver inhibit */
 
 /* Accumulated mouse movement (REMOTE mode) */
 static int pending_dx = 0;
@@ -194,6 +195,7 @@ static void switch_to_local(void) {
 
     /* User is actively switching back — clear any lock suspension */
     remote_locked = 0;
+    local_locked  = 0;
     meta_held     = 0;
 
     state_set(STATE_LOCAL);
@@ -247,7 +249,17 @@ static void dispatch_event(const InputEvent *ev) {
             /* Win+L: inject locally (triggers Linux lock) AND lock remote */
             if (ev->code == KEY_L && ev->value == 1 && meta_held) {
                 trigger_remote_lock();
+                local_locked = 1;
                 /* Fall through: still inject to uinput so Linux locks too */
+            }
+
+            /* Once locked, the first non-Meta/L keydown means the user is
+             * unlocking (typing password) — resume normal screensaver inhibit. */
+            if (local_locked && ev->value == 1 &&
+                ev->code != KEY_LEFTMETA && ev->code != KEY_RIGHTMETA &&
+                ev->code != KEY_L) {
+                local_locked = 0;
+                printf("[LOCK] Local input resumed; screensaver inhibit re-enabled\n");
             }
         }
 
@@ -298,8 +310,9 @@ static void signal_handler(int sig) {
 static void handle_periodic(void) {
     time_t now = time(NULL);
 
-    /* Prevent X11 screensaver */
-    if (now - last_inhibit >= INHIBIT_INTERVAL_S) {
+    /* Prevent X11 screensaver — but not when we've locked the screen via Win+L,
+     * otherwise XResetScreenSaver keeps the display awake on the lock screen. */
+    if (!local_locked && now - last_inhibit >= INHIBIT_INTERVAL_S) {
         inhibit_reset();
         last_inhibit = now;
     }
