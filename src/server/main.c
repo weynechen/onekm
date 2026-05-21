@@ -4,325 +4,454 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
-#include <fcntl.h>
 #include <errno.h>
-#include <termios.h>
-#include <sys/ioctl.h>
-#include <stdarg.h>
-#include <linux/input.h>
-#include <linux/input-event-codes.h>
 #include <time.h>
-#include <sched.h>
-#include <pthread.h>
-#include <poll.h>
+#include <sys/epoll.h>
+#include <linux/input.h>
+
 #include "common/protocol.h"
 #include "input_capture.h"
+#include "uinput_inject.h"
+#include "hotplug.h"
+#include "inhibit.h"
+#include "uart.h"
 #include "state_machine.h"
 #include "keyboard_state.h"
-#include "key_sync.h"
 
-static int running = 1;
-static int uart_fd = -1;
-static struct termios saved_termios;
+/* ------------------------------------------------------------------ */
+/* Constants                                                            */
+/* ------------------------------------------------------------------ */
+#define MAX_DEVICES       16
+#define MAX_EPOLL_EVENTS  32
+#define HEARTBEAT_INTERVAL_S  30   /* mouse-wiggle interval to keep Windows awake */
+#define INHIBIT_INTERVAL_S    25   /* XResetScreenSaver interval                  */
+#define PAUSE_EXIT_COUNT       3   /* triple-press PAUSE to quit                  */
+#define PAUSE_EXIT_WINDOW_S    2   /* within this many seconds                    */
+#define WIN_L_HOLD_MS         50   /* delay between Win+L press and release HID   */
 
-static void set_raw_terminal_mode(void) {
-    struct termios raw;
-    tcgetattr(STDIN_FILENO, &saved_termios);
-    raw = saved_termios;
-    raw.c_lflag &= ~(ECHO | ICANON);
-    raw.c_lflag |= ISIG;
-    raw.c_cc[VINTR] = 3;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+/* ------------------------------------------------------------------ */
+/* Global state                                                         */
+/* ------------------------------------------------------------------ */
+static volatile int running = 1;
+static int epoll_fd = -1;
+
+/* PAUSE key press counting for exit */
+static int    pause_count      = 0;
+static time_t last_pause_time  = 0;
+
+/* Win+L tracking */
+static int meta_held    = 0;   /* is Left/Right Meta currently held in LOCAL mode? */
+static int remote_locked = 0;  /* Win+L was sent; suspend heartbeat until REMOTE */
+
+/* Accumulated mouse movement (REMOTE mode) */
+static int pending_dx = 0;
+static int pending_dy = 0;
+
+/* Mouse button state for clean release on mode switch */
+static uint8_t mouse_buttons = 0;  /* bit0=left bit1=right bit2=middle */
+
+/* Heartbeat / inhibit timers */
+static time_t last_heartbeat = 0;
+static time_t last_inhibit   = 0;
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                              */
+/* ------------------------------------------------------------------ */
+static void epoll_add(int fd) {
+    struct epoll_event ev;
+    ev.events  = EPOLLIN;
+    ev.data.fd = fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0 && errno != EEXIST) {
+        fprintf(stderr, "[MAIN] epoll_ctl ADD fd=%d: %s\n", fd, strerror(errno));
+    }
 }
 
-static void restore_terminal_mode(void) {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_termios);
+/* Note: no explicit epoll_del needed — Linux removes closed fds from epoll automatically */
+
+/* ------------------------------------------------------------------ */
+/* Remote event sending                                                 */
+/* ------------------------------------------------------------------ */
+static void flush_mouse(void) {
+    if (pending_dx == 0 && pending_dy == 0) return;
+    Message msg;
+    int16_t dx = (int16_t)(pending_dx > 32767 ? 32767 : pending_dx < -32768 ? -32768 : pending_dx);
+    int16_t dy = (int16_t)(pending_dy > 32767 ? 32767 : pending_dy < -32768 ? -32768 : pending_dy);
+    msg_mouse_move(&msg, dx, dy);
+    uart_send(&msg);
+    pending_dx -= dx;
+    pending_dy -= dy;
 }
 
-void signal_handler(int sig) {
-    if (sig == SIGINT || sig == SIGTERM) {
+/* Release all held keys/buttons on the remote machine. */
+static void remote_release_all(void) {
+    Message msg;
+
+    flush_mouse();
+
+    HIDKeyboardReport zero = {0};
+    msg_keyboard_report(&msg, &zero);
+    uart_send(&msg);
+    keyboard_state_reset(NULL);
+
+    for (int i = 0; i < 3; i++) {
+        if (mouse_buttons & (uint8_t)(1u << i)) {
+            msg_mouse_button(&msg, (uint8_t)(i + 1), BUTTON_RELEASED);
+            uart_send(&msg);
+        }
+    }
+    mouse_buttons = 0;
+}
+
+static void handle_remote_key(const InputEvent *ev) {
+    Message msg;
+
+    /* Mouse buttons (BTN_LEFT=272, BTN_RIGHT=273, BTN_MIDDLE=274) */
+    if (ev->code == BTN_LEFT || ev->code == BTN_RIGHT || ev->code == BTN_MIDDLE) {
+        uint8_t btn = (ev->code == BTN_LEFT) ? 1u : (ev->code == BTN_RIGHT) ? 2u : 3u;
+        uint8_t bit = (uint8_t)(1u << (btn - 1));
+        if (ev->value) mouse_buttons |=  bit;
+        else           mouse_buttons &= ~bit;
+        msg_mouse_button(&msg, btn, (uint8_t)ev->value);
+        uart_send(&msg);
+        return;
+    }
+
+    /* Key repeat (value==2): target machine handles its own repeat */
+    if (ev->value == 2) return;
+
+    HIDKeyboardReport report;
+    if (keyboard_state_process_key(ev->code, (uint8_t)ev->value, &report)) {
+        msg_keyboard_report(&msg, &report);
+        uart_send(&msg);
+    }
+}
+
+static void handle_remote_rel(const InputEvent *ev) {
+    Message msg;
+
+    if (ev->code == REL_X) {
+        pending_dx += ev->value;
+    } else if (ev->code == REL_Y) {
+        pending_dy += ev->value;
+        /* Flush when we have both axes — reduces packets */
+        if (pending_dx != 0 || pending_dy != 0) flush_mouse();
+    } else if (ev->code == REL_WHEEL || ev->code == REL_HWHEEL) {
+        flush_mouse();
+        int16_t vert  = (ev->code == REL_WHEEL)  ? (int16_t)ev->value : 0;
+        int16_t horiz = (ev->code == REL_HWHEEL) ? (int16_t)ev->value : 0;
+        msg_mouse_wheel(&msg, vert, horiz);
+        uart_send(&msg);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Win+L: lock both machines                                            */
+/* ------------------------------------------------------------------ */
+static void trigger_remote_lock(void) {
+    Message msg;
+    HIDKeyboardReport rpt = {0};
+
+    /* Press Win+L */
+    rpt.modifiers = MODIFIER_LEFT_GUI;
+    rpt.keys[0]   = 15;  /* HID usage code for 'L' */
+    msg_keyboard_report(&msg, &rpt);
+    uart_send(&msg);
+
+    /* Hold briefly so the target OS registers the combo */
+    usleep(WIN_L_HOLD_MS * 1000);
+
+    /* Release */
+    memset(&rpt, 0, sizeof(rpt));
+    msg_keyboard_report(&msg, &rpt);
+    uart_send(&msg);
+
+    remote_locked = 1;
+    printf("[LOCK] Win+L sent to remote; heartbeat suspended until next REMOTE session\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Mode switching                                                       */
+/* ------------------------------------------------------------------ */
+static void switch_to_remote(void) {
+    keyboard_state_reset(NULL);
+    pending_dx  = 0;
+    pending_dy  = 0;
+    mouse_buttons = 0;
+
+    Message msg;
+    msg_switch(&msg, CONTROL_REMOTE);
+    uart_send(&msg);
+
+    state_set(STATE_REMOTE);
+}
+
+static void switch_to_local(void) {
+    remote_release_all();
+
+    Message msg;
+    msg_switch(&msg, CONTROL_LOCAL);
+    uart_send(&msg);
+
+    /* User is actively switching back — clear any lock suspension */
+    remote_locked = 0;
+    meta_held     = 0;
+
+    state_set(STATE_LOCAL);
+}
+
+/* ------------------------------------------------------------------ */
+/* PAUSE key handler                                                    */
+/* ------------------------------------------------------------------ */
+static void handle_pause_press(void) {
+    time_t now = time(NULL);
+
+    if (now - last_pause_time <= PAUSE_EXIT_WINDOW_S) {
+        pause_count++;
+    } else {
+        pause_count = 1;
+    }
+    last_pause_time = now;
+
+    if (pause_count >= PAUSE_EXIT_COUNT) {
+        printf("[MAIN] PAUSE x%d — exiting\n", PAUSE_EXIT_COUNT);
+        state_request_exit();
         running = 0;
-        printf("\nShutting down...\n");
+        return;
+    }
+
+    printf("[PAUSE] %d/%d\n", pause_count, PAUSE_EXIT_COUNT);
+
+    if (state_get() == STATE_LOCAL) {
+        switch_to_remote();
+    } else {
+        switch_to_local();
     }
 }
 
-void emergency_cleanup(void) {
-    printf("\nEmergency cleanup - releasing all input devices...\n");
-    restore_terminal_mode();
-    set_device_grab(0);
-    key_sync_cleanup();
-    cleanup_input_capture();
-
-    if (uart_fd >= 0) {
-        close(uart_fd);
-    }
-}
-
-int init_uart(const char *port, int baud_rate) {
-    struct termios tty;
-    speed_t baud;
-
-    uart_fd = open(port, O_RDWR | O_NOCTTY | O_SYNC);
-    if (uart_fd < 0) {
-        perror("Failed to open UART device");
-        return -1;
+/* ------------------------------------------------------------------ */
+/* Central event dispatcher                                             */
+/* ------------------------------------------------------------------ */
+static void dispatch_event(const InputEvent *ev) {
+    /* PAUSE is always consumed here, never forwarded */
+    if (ev->type == EV_KEY && ev->code == KEY_PAUSE) {
+        if (ev->value == 1) handle_pause_press();
+        return;
     }
 
-    switch (baud_rate) {
-        case 230400: baud = B230400; break;
-        case 460800: baud = B460800; break;
-        case 921600: baud = B921600; break;
-        default: baud = B115200; break;
-    }
+    if (state_get() == STATE_LOCAL) {
+        /* Track Meta key for Win+L detection */
+        if (ev->type == EV_KEY) {
+            if (ev->code == KEY_LEFTMETA || ev->code == KEY_RIGHTMETA) {
+                meta_held = (ev->value != 0);
+            }
+            /* Win+L: inject locally (triggers Linux lock) AND lock remote */
+            if (ev->code == KEY_L && ev->value == 1 && meta_held) {
+                trigger_remote_lock();
+                /* Fall through: still inject to uinput so Linux locks too */
+            }
+        }
 
-    if (tcgetattr(uart_fd, &tty) != 0) {
-        perror("tcgetattr failed");
-        close(uart_fd);
-        return -1;
-    }
+        /* Pass the raw event to the local virtual device */
+        uinput_inject_event(ev->type, ev->code, ev->value);
 
-    cfsetospeed(&tty, baud);
-    cfsetispeed(&tty, baud);
+    } else { /* STATE_REMOTE */
+        /* Ignore SYN/MSC — only process actionable input */
+        if (ev->type == EV_SYN || ev->type == EV_MSC) return;
 
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-
-    tty.c_lflag &= ~ICANON;
-    tty.c_lflag &= ~ECHO;
-    tty.c_lflag &= ~ECHOE;
-    tty.c_lflag &= ~ECHONL;
-    tty.c_lflag &= ~ISIG;
-
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-
-    tty.c_oflag &= ~OPOST;
-
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 10;
-
-    if (tcsetattr(uart_fd, TCSANOW, &tty) != 0) {
-        perror("tcsetattr failed");
-        close(uart_fd);
-        return -1;
-    }
-
-    printf("UART initialized: %s at %d baud\n", port, baud_rate);
-    return 0;
-}
-
-void send_message(Message *msg) {
-    if (uart_fd >= 0 && msg) {
-        int sent = write(uart_fd, msg, sizeof(Message));
-        if (sent != sizeof(Message)) {
-            fprintf(stderr, "UART write error: %s\n", strerror(errno));
+        if (ev->type == EV_KEY) {
+            handle_remote_key(ev);
+        } else if (ev->type == EV_REL) {
+            handle_remote_rel(ev);
         }
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Hotplug callbacks                                                    */
+/* ------------------------------------------------------------------ */
+static void on_device_added(const char *path) {
+    int fd = input_capture_add_device(path);
+    if (fd >= 0) {
+        epoll_add(fd);
+    }
+}
+
+static void on_device_removed(const char *path) {
+    /* Removal from our device list already happened in read_fd (ENODEV).
+     * The closed fd is automatically removed from epoll by the kernel.
+     * This callback is just informational. */
+    printf("[HOTPLUG] Remove event for %s\n", path);
+    input_capture_remove_device(path);
+}
+
+/* ------------------------------------------------------------------ */
+/* Signal handler                                                       */
+/* ------------------------------------------------------------------ */
+static void signal_handler(int sig) {
+    (void)sig;
+    running = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Periodic tasks                                                       */
+/* ------------------------------------------------------------------ */
+static void handle_periodic(void) {
+    time_t now = time(NULL);
+
+    /* Prevent X11 screensaver */
+    if (now - last_inhibit >= INHIBIT_INTERVAL_S) {
+        inhibit_reset();
+        last_inhibit = now;
+    }
+
+    /* Heartbeat: small mouse wiggle to keep Windows from sleeping.
+     * Only when LOCAL (we're not actively using the remote) and not locked. */
+    if (state_get() == STATE_LOCAL && !remote_locked) {
+        if (last_heartbeat == 0) {
+            last_heartbeat = now;
+        } else if (now - last_heartbeat >= HEARTBEAT_INTERVAL_S) {
+            Message msg;
+            /* Two-step wiggle: +1 then -1 pixel so cursor returns to origin */
+            msg_mouse_move(&msg, 1, 1);
+            uart_send(&msg);
+            msg_mouse_move(&msg, -1, -1);
+            uart_send(&msg);
+            last_heartbeat = now;
+            printf("[HEARTBEAT] Sent mouse wiggle to keep remote awake\n");
+        }
+    }
+
+    /* Flush any residual mouse movement in REMOTE mode */
+    if (state_get() == STATE_REMOTE) {
+        flush_mouse();
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                                 */
+/* ------------------------------------------------------------------ */
 int main(int argc, char *argv[]) {
-    Message msg;
     const char *uart_port = "/dev/ttyACM0";
     int baud_rate = 230400;
 
-    if (argc > 1) {
-        uart_port = argv[1];
-    }
+    if (argc > 1) uart_port = argv[1];
     if (argc > 2) {
         baud_rate = atoi(argv[2]);
         if (baud_rate != 115200 && baud_rate != 230400 &&
             baud_rate != 460800 && baud_rate != 921600) {
-            fprintf(stderr, "Warning: Unsupported baud rate %d, using 230400\n", baud_rate);
+            fprintf(stderr, "[MAIN] Unsupported baud rate %d, defaulting to 230400\n", baud_rate);
             baud_rate = 230400;
         }
     }
 
-    printf("OneKM Server v2.0.0 (UART Mode)\n");
-    printf("Using UART device: %s at %d baud\n", uart_port, baud_rate);
+    printf("OneKM Server 2.0\n");
+    printf("UART: %s @ %d baud\n", uart_port, baud_rate);
 
+    signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
-    atexit(emergency_cleanup);
 
-    if (init_input_capture() != 0) {
-        fprintf(stderr, "Failed to initialize input capture\n");
+    /* Initialise uinput FIRST so the virtual device exists before we scan
+     * /dev/input — otherwise we might accidentally grab our own device. */
+    if (uinput_inject_init() != 0) {
+        fprintf(stderr, "[MAIN] Failed to create uinput virtual device\n");
         return 1;
     }
 
-    init_state_machine();
+    if (input_capture_init() != 0) {
+        fprintf(stderr, "[MAIN] Failed to grab input devices\n");
+        uinput_inject_cleanup();
+        return 1;
+    }
+
+    if (hotplug_init(on_device_added, on_device_removed) != 0) {
+        fprintf(stderr, "[MAIN] Warning: hotplug unavailable\n");
+    }
+
+    inhibit_init();   /* non-fatal if X11 not available */
+
+    if (uart_init(uart_port, baud_rate) != 0) {
+        fprintf(stderr, "[MAIN] Failed to initialise UART\n");
+        hotplug_cleanup();
+        input_capture_cleanup();
+        uinput_inject_cleanup();
+        return 1;
+    }
+
+    state_init();
     keyboard_state_init();
 
-    if (key_sync_init() != 0) {
-        fprintf(stderr, "Warning: Failed to initialize key sync module\n");
-        fprintf(stderr, "Key synchronization will be disabled\n");
+    /* Build epoll set */
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0) {
+        perror("[MAIN] epoll_create1");
+        goto shutdown;
     }
 
-    if (init_uart(uart_port, baud_rate) != 0) {
-        fprintf(stderr, "Failed to initialize UART\n");
-        key_sync_cleanup();
-        cleanup_input_capture();
-        return 1;
+    /* Register all input device fds */
+    {
+        int fds[MAX_DEVICES];
+        int n = input_capture_get_fds(fds, MAX_DEVICES);
+        for (int i = 0; i < n; i++) epoll_add(fds[i]);
     }
 
-    printf("Ready. Press PAUSE to toggle LOCAL/REMOTE mode\n");
-    printf("Press PAUSE 3 times within 2 seconds to shutdown\n");
-
-    set_raw_terminal_mode();
-    printf("Terminal set to raw mode\n");
-
-#define MAX_DEVICES 10
-
-    HIDKeyboardReport keyboard_report;
-
-    time_t last_heartbeat = 0;
-    const time_t heartbeat_interval = 30;
-    int heartbeat_mouse_moved = 0;
-    int heartbeat_suspended = 0;  /* set when remote lock (Win+L) sent; cleared when entering REMOTE */
-
-    struct timespec last_mouse_flush = {0, 0};
-
-    int device_fds[MAX_DEVICES];
-    int num_fds = get_device_fds(device_fds, MAX_DEVICES);
-
-    struct pollfd pollfds[MAX_DEVICES];
-    for (int i = 0; i < num_fds; i++) {
-        pollfds[i].fd = device_fds[i];
-        pollfds[i].events = POLLIN;
+    /* Register udev monitor fd */
+    {
+        int ufd = hotplug_get_fd();
+        if (ufd >= 0) epoll_add(ufd);
     }
 
-    while (running) {
-        if (should_exit()) {
-            printf("Exit requested, shutting down...\n");
+    printf("[MAIN] Ready. PAUSE = toggle LOCAL/REMOTE, PAUSE x3 = exit\n");
+
+    /* ---- Main event loop ---- */
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+
+    while (running && !state_should_exit()) {
+        int n = epoll_wait(epoll_fd, events, MAX_EPOLL_EVENTS, 200 /* ms */);
+
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            perror("[MAIN] epoll_wait");
             break;
         }
 
-        int events_processed = 0;
-        ControlState current_state = get_current_state();
+        int udev_fd = hotplug_get_fd();
 
-        /* Clear remote-lock heartbeat suspension when using remote again */
-        if (current_state == STATE_REMOTE) {
-            heartbeat_suspended = 0;
-        }
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].data.fd;
 
-        if (current_state == STATE_LOCAL) {
-            time_t current_time = time(NULL);
+            if (fd == udev_fd) {
+                hotplug_process();
+                continue;
+            }
 
-            if (!heartbeat_suspended && heartbeat_mouse_moved > 0) {
-                int xy_move = (heartbeat_mouse_moved % 2 == 0) ? 1 : -1;
-                heartbeat_mouse_moved--;
-                msg_mouse_move(&msg, xy_move, xy_move);
-                send_message(&msg);
-                events_processed++;
-
-                if (heartbeat_mouse_moved == 0) {
-                    printf("[HEARTBEAT] Mouse movement heartbeat sent\n");
-                }
-            } else if (!heartbeat_suspended && last_heartbeat == 0) {
-                last_heartbeat = current_time;
-            } else if (!heartbeat_suspended && current_time - last_heartbeat >= heartbeat_interval) {
-                printf("[HEARTBEAT] Starting mouse movement heartbeat\n");
-                heartbeat_mouse_moved = 5;
-                last_heartbeat = current_time;
-                events_processed++;
+            /* Drain all buffered events from this device fd */
+            InputEvent ev;
+            while (input_capture_read_fd(fd, &ev) == 0) {
+                dispatch_event(&ev);
             }
         }
 
-        if (current_state == STATE_REMOTE) {
-            struct timespec current_ts;
-            clock_gettime(CLOCK_MONOTONIC, &current_ts);
-
-            for (int i = 0; i < 20; i++) {
-                InputEvent event;
-                int captured = capture_input(&event);
-                if (captured == 0) {
-                    if (event.type == EV_KEY && event.code == KEY_PAUSE && event.value == 1 &&
-                        get_current_state() == STATE_LOCAL && heartbeat_mouse_moved > 0) {
-                        printf("[HEARTBEAT] Canceling pending mouse movements before mode switch\n");
-                        heartbeat_mouse_moved = 0;
-                    }
-
-                    if (process_event(&event, &msg)) {
-                        send_message(&msg);
-                        events_processed++;
-                    } else if (get_current_state() == STATE_REMOTE && event.type == EV_KEY) {
-                        if (keyboard_state_process_key(event.code, event.value, &keyboard_report)) {
-                            msg_keyboard_report(&msg, &keyboard_report);
-                            send_message(&msg);
-                            events_processed++;
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if (events_processed == 0) {
-                long time_since_flush = (current_ts.tv_sec - last_mouse_flush.tv_sec) * 1000000 +
-                                       (current_ts.tv_nsec - last_mouse_flush.tv_nsec) / 1000;
-                if (time_since_flush > 5000) {
-                    if (flush_pending_mouse_movement(&msg)) {
-                        send_message(&msg);
-                        events_processed++;
-                    }
-                    last_mouse_flush = current_ts;
-                }
-            } else {
-                last_mouse_flush = current_ts;
-            }
-        } else {
-            if (poll(pollfds, num_fds, 1) > 0) {
-                InputEvent event;
-                if (capture_input(&event) == 0) {
-                    if (event.type == EV_KEY && event.code == KEY_PAUSE && event.value == 1) {
-                        process_event(&event, &msg);
-                    } else if (event.type == EV_KEY && event.code == KEY_L && event.value == 1) {
-                        /* Detect Win+L in LOCAL: send lock to remote and stop wake heartbeat */
-                        uint8_t key_states[32];
-                        if (get_hardware_keyboard_state(key_states) == 0) {
-                            int win_pressed = (key_states[KEY_LEFTMETA / 8] >> (KEY_LEFTMETA % 8)) & 1;
-                            win_pressed |= (key_states[KEY_RIGHTMETA / 8] >> (KEY_RIGHTMETA % 8)) & 1;
-                            if (win_pressed) {
-                                HIDKeyboardReport lock_press = {0};
-                                lock_press.modifiers = MODIFIER_LEFT_GUI;
-                                lock_press.keys[0] = 15;  /* HID usage for L */
-                                msg_keyboard_report(&msg, &lock_press);
-                                send_message(&msg);
-                                events_processed++;
-                                HIDKeyboardReport lock_release = {0};
-                                msg_keyboard_report(&msg, &lock_release);
-                                send_message(&msg);
-                                events_processed++;
-                                heartbeat_suspended = 1;
-                                printf("[LOCK] Win+L sent to remote, wake heartbeat suspended\n");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        int sleep_time;
-        if (current_state == STATE_LOCAL) {
-            sleep_time = heartbeat_mouse_moved > 0 ? 5 : 50;
-        } else {
-            sleep_time = events_processed > 0 ? 0 : 1;
-        }
-
-        if (events_processed == 0 && sleep_time > 0) {
-            usleep(sleep_time * 1000);
-        }
+        handle_periodic();
     }
 
-    cleanup_state_machine();
-    key_sync_cleanup();
-    cleanup_input_capture();
+shutdown:
+    printf("[MAIN] Shutting down...\n");
 
-    if (uart_fd >= 0) {
-        close(uart_fd);
+    if (state_get() == STATE_REMOTE) {
+        remote_release_all();
+        Message msg;
+        msg_switch(&msg, CONTROL_LOCAL);
+        uart_send(&msg);
     }
 
-    printf("Server shutdown complete\n");
+    if (epoll_fd >= 0) close(epoll_fd);
+
+    uart_cleanup();
+    hotplug_cleanup();
+    input_capture_cleanup();
+    inhibit_cleanup();
+    uinput_inject_cleanup();
+
+    printf("[MAIN] Done\n");
     return 0;
 }

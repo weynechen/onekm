@@ -6,18 +6,28 @@
 typedef struct {
     uint16_t type;
     uint16_t code;
-    int32_t value;
+    int32_t  value;
 } InputEvent;
 
-int init_input_capture(void);
-int capture_input(InputEvent *event);
-int get_device_fds(int *fds, int max_fds);
-void set_device_grab(int grab);
-void cleanup_input_capture(void);
+/* Scan /dev/input/event* and grab all keyboard/mouse devices.
+ * Returns 0 on success, -1 if no devices found. */
+int input_capture_init(void);
 
-// Get hardware keyboard state (which keys are physically pressed)
-// key_states: array of 256 bits (32 bytes) representing key states
-// Returns 0 on success, -1 on failure
-int get_hardware_keyboard_state(uint8_t key_states[32]);
+/* Add and grab a device by path. Returns the new fd, or -1 if not added
+ * (already tracked, not a keyboard/mouse, or is our own uinput device). */
+int input_capture_add_device(const char *path);
+
+/* Ungrab and remove a device by path. No-op if not tracked. */
+void input_capture_remove_device(const char *path);
+
+/* Copy currently tracked fds into fds[]. Returns count. */
+int input_capture_get_fds(int *fds, int max_fds);
+
+/* Read one event from the device that owns fd.
+ * Returns 0 on success (event filled), -1 when no more events.
+ * Handles ENODEV internally (removes disconnected device, closes fd). */
+int input_capture_read_fd(int fd, InputEvent *event);
+
+void input_capture_cleanup(void);
 
 #endif // INPUT_CAPTURE_H

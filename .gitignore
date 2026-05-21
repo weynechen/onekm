@@ -59,4 +59,7 @@ windows_result.txt
 *.swp
 
 .stignore
+./cache
 .cache
+build2/
+
